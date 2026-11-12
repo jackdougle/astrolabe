@@ -1,0 +1,43 @@
+export default async function ({ page, shot, run, type, state, work }) {
+  await run(`cd ${work}`);
+  await run('git init -q . && echo ok');
+  await shot('60-rest');
+  await page.keyboard.press('Meta+t');
+  await page.waitForTimeout(700);
+  await shot('61-tabs-flash');
+  await page.waitForTimeout(1400);
+  await run('sleep 5', 500);
+  console.log('labels:', JSON.stringify(await page.evaluate(() => [...document.querySelectorAll('.toptab')].map((t) => t.querySelector('.toptab-text').textContent))));
+  console.log('tab row visible:', await page.evaluate(() => getComputedStyle(document.querySelector('.top-tabs')).opacity === '1'));
+  await page.keyboard.press('Meta+1');
+  await page.waitForTimeout(500);
+  await page.keyboard.press('Meta+b');
+  await page.waitForTimeout(700);
+  await shot('62-navigator');
+  await page.click('.treerow:has-text("notes")');
+  await page.waitForTimeout(300);
+  await page.click('.treerow:has-text("plan.md")');
+  await page.waitForTimeout(1300);
+  await shot('63-note-open');
+  await page.keyboard.press('Meta+Shift+v');
+  await page.waitForTimeout(600);
+  console.log('raw after ⇧⌘V:', await page.evaluate(() => !!document.querySelector('.editor-host:not([style*="none"])')));
+  await type(':roc');
+  await page.waitForTimeout(700);
+  await shot('64-emoji-note');
+  console.log('emoji rows:', await page.evaluate(() => [...document.querySelectorAll('.suggest-widget.visible .monaco-list-row')].slice(0, 3).map((r) => r.textContent.slice(0, 24))));
+  await page.keyboard.press('Escape');
+  // terminal keys in the command input
+  await page.keyboard.press('Meta+Alt+ArrowLeft');
+  await page.waitForTimeout(500);
+  await type('git commit --amend');
+  await page.keyboard.press('Control+w');
+  const inputText = () => page.evaluate(() => window.__monaco.editor.getEditors().find((e) => e.hasTextFocus())?.getValue());
+  console.log('after ctrl+w:', JSON.stringify(await inputText()));
+  await page.keyboard.press('Control+u');
+  console.log('after ctrl+u:', JSON.stringify(await inputText()));
+  await shot('65-after-resize');
+  await page.keyboard.press('Meta+b');
+  await page.waitForTimeout(400);
+  console.log('end', JSON.stringify(await state()));
+}

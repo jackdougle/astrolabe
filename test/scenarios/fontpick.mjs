@@ -1,0 +1,40 @@
+// Font pickers: each row draws in its own face, and moving the highlight previews at once.
+export default async function ({ page, shot, run, work }) {
+  await run(`cd ${work}`);
+  await page.keyboard.press('Meta+b');
+  await page.waitForTimeout(400);
+  await page.click('.side-foot button:first-child');
+  await page.waitForTimeout(250);
+  await page.click('.palette-row:has-text("Fonts")');
+  await page.waitForTimeout(250);
+  await page.click('.palette-row:has-text("Notes text font")');
+  await page.waitForTimeout(1200);
+  const faces = await page.evaluate(() => [...document.querySelectorAll('.palette-row')].slice(0, 6).map((r) => [r.querySelector('.palette-label').textContent, getComputedStyle(r.querySelector('.palette-label')).fontFamily.slice(0, 60)]));
+  console.log('row faces', JSON.stringify(faces));
+  const before = await page.evaluate(() => (document.querySelector('.markdown') ? 'present' : 'none'));
+  const t0 = Date.now();
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('ArrowDown');
+  await page.waitForFunction(() => document.documentElement.style.getPropertyValue('--notes').includes('ADLaM') || document.documentElement.style.getPropertyValue('--notes').includes('ABeeZee'), null, { timeout: 5000 }).catch(() => {});
+  const notes = await page.evaluate(() => document.documentElement.style.getPropertyValue('--notes'));
+  console.log('notes var after 2 downs', JSON.stringify(notes), 'ms', Date.now() - t0, 'before', before);
+  await page.waitForTimeout(800);
+  console.log('markdown font now', await page.evaluate(() => (document.querySelector('.markdown') ? 'present' : 'none')));
+  await shot('fontpick-notes');
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(200);
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(200);
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(200);
+  await page.click('.side-foot button:first-child');
+  await page.waitForTimeout(250);
+  await page.click('.palette-row:has-text("Fonts")');
+  await page.waitForTimeout(250);
+  await page.click('.palette-row:has-text("Terminal and code font")');
+  await page.waitForTimeout(1200);
+  await page.keyboard.press('ArrowDown');
+  await page.waitForTimeout(1200);
+  console.log('terminal font now', await page.evaluate(() => (document.querySelector('.term-host .xterm') ? getComputedStyle(document.querySelector('.term-host .xterm')).fontFamily.slice(0, 80) : 'no xterm')));
+  await shot('fontpick-code');
+}

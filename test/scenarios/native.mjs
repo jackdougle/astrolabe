@@ -1,0 +1,30 @@
+export default async function ({ page, shot, run, type, state, work }) {
+  await shot('50-native-boot');
+  await run(`cd ${work}`);
+  await run('echo hello && ls');
+  await run('false');
+  await shot('51-native-blocks');
+  const info = await page.evaluate(() => { const s = [...window.__sessions.values()][0]; const el = document.querySelector('.cmd-input'); const r = el.getBoundingClientRect(); return { native: s.native, state: s.state, blocks: s.blocks.length, input: [r.left, r.top, r.width, r.height].map(Math.round), cls: el.className, cursor: [s.term.buffer.active.cursorX, s.term.buffer.active.cursorY] }; });
+  console.log('native', JSON.stringify(info));
+  await type('echo one \\');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(900);
+  await shot('52-continuation');
+  console.log('focus in continuation:', (await state()).active);
+  await type('two');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(900);
+  await type('echo :so');
+  await page.waitForTimeout(600);
+  await shot('53-emoji');
+  await type('b:');
+  await page.waitForTimeout(400);
+  console.log('input after :sob: →', JSON.stringify(await page.evaluate(() => window.__monaco.editor.getModels().find((m) => m.uri.scheme === 'astrolabe-input')?.getValue())));
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(800);
+  await run('sleep 3', 900);
+  await shot('54-running');
+  await page.waitForTimeout(2600);
+  await shot('55-end');
+  console.log('end', JSON.stringify(await state()));
+}

@@ -1,0 +1,436 @@
+@font-face { font-family: "Symbols Nerd Font Mono"; src: url("./assets/fonts/SymbolsNerdFontMono-Regular.ttf") format("truetype"); font-display: block; }
+
+:root {
+  --ui: "Instrument Sans Variable", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  --mono: "Commit Mono", "Symbols Nerd Font Mono", "SF Mono", Menlo, monospace;
+  --neon: #3FD8FF;
+  --alpha-focused: 0.95;
+  --alpha-unfocused: 0.89;
+  --alpha: var(--alpha-focused);
+  --editor-alpha-focused: 0.975;
+  --editor-alpha-unfocused: 0.915;
+  --editor-alpha: var(--editor-alpha-focused);
+  --chrome-alpha-focused: 1;
+  --chrome-alpha-unfocused: 0.94;
+  --chrome-alpha: var(--chrome-alpha-focused);
+  --zoom: 1;
+  --bar: calc(38px / var(--zoom));
+  --radius: 6px;
+  /* Opening things settles quickly; closing them is quicker still (EXIT_MS in motion.ts matches --exit). */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --enter: 0.22s;
+  --exit: 0.17s;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body.is-blurred { --alpha: var(--alpha-unfocused); --editor-alpha: var(--editor-alpha-unfocused); --chrome-alpha: var(--chrome-alpha-unfocused); }
+/* Full screen there is no desktop behind to see through to, so it stays at its focused opacity. */
+.app.is-fullscreen { --alpha: var(--alpha-focused); --editor-alpha: var(--editor-alpha-focused); --chrome-alpha: var(--chrome-alpha-focused); }
+body {
+  background: transparent; color: var(--text);
+  /* The whole interface is monospaced. Only rendered notes use another face (--notes). */
+  font: 12px/1.4 var(--mono);
+  overflow: hidden; user-select: none; -webkit-font-smoothing: antialiased; cursor: default;
+}
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: default; }
+button:focus-visible, input:focus-visible, [tabindex]:focus-visible { outline: 1.5px solid var(--accent); outline-offset: 1px; }
+input { font: inherit; color: inherit; }
+kbd { font: 11px var(--mono); color: var(--faint); letter-spacing: 0.04em; }
+.ico { display: block; flex: none; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--faint) 45%, transparent); border-radius: 5px; border: 2.5px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--faint); background-clip: content-box; }
+body.is-resizing { cursor: col-resize; }
+body.is-resizing.is-resizing-col { cursor: row-resize; }
+body.is-resizing .stack, body.is-resizing .sidebar-body { pointer-events: none; }
+/* Dragging a divider or the navigator's edge follows the mouse exactly. */
+body.is-resizing .pane, body.is-resizing .sidebar-slot, body.is-resizing .sidebar { transition: none !important; }
+
+/* ---------- frame ---------- */
+/* The window is see-through over the blurred desktop: this one layer carries the tint, and everything
+   above it is transparent. Focus changes only move --alpha, so the fade is a plain colour transition. */
+.app {
+  /* The window carries the terminal's tint. Other surfaces add only what they need on top of it to
+     reach their own overall opacity: the editor (--editor-alpha) and the tab row and navigator (--chrome-alpha). */
+  --gap: max(0.001, 1 - var(--alpha));
+  --editor-layer: clamp(0, calc(1 - (1 - var(--editor-alpha)) / var(--gap)), 1);
+  --chrome-layer: clamp(0, calc(1 - (1 - var(--chrome-alpha)) / var(--gap)), 1);
+}
+.app { position: relative; display: flex; flex-direction: column; height: 100%; background: color-mix(in srgb, var(--bg) calc(var(--alpha) * 100%), transparent); transition: background-color 0.32s ease; }
+.app-body { position: relative; flex: 1; min-height: 0; display: flex; }
+.app-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.starfield { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+html[data-theme="light"] .starfield { opacity: 0.4; filter: invert(1); }
+
+/* ---------- top strip: the tabs, always shown, in the row that holds the window controls ---------- */
+.topbar {
+  position: relative; flex: none; height: var(--bar); display: flex; align-items: center; gap: 6px;
+  padding: 0 8px 0 calc(78px / var(--zoom)); -webkit-app-region: drag;
+  border-bottom: 1px solid var(--line);
+}
+.app.is-fullscreen .topbar { padding-left: 10px; }
+.top-dir { color: var(--dim); }
+.top-app { color: var(--text); }
+.top-tabs { flex: 1; min-width: 0; display: flex; align-items: center; gap: 7px; height: 100%; }
+/* Tabs that belong together, a tab's terminals and the files opened from them, are joined in one block with no space
+   between them; blocks stand apart. A block of one looks like a plain tab. */
+.tab-group { -webkit-app-region: no-drag; flex: 0 1 auto; min-width: 0; display: flex; align-items: center; border-radius: 7px; }
+.tab-group.is-joined { background: color-mix(in srgb, var(--surface) 22%, transparent); box-shadow: inset 0 0 0 1px var(--line); }
+.tab-group.is-joined.is-front { background: color-mix(in srgb, var(--surface) 32%, transparent); }
+.tab-group.is-joined > .toptab { border-radius: 0; }
+.tab-group.is-joined > .toptab:first-child { border-top-left-radius: 7px; border-bottom-left-radius: 7px; }
+.tab-group.is-joined > .toptab:last-child { border-top-right-radius: 7px; border-bottom-right-radius: 7px; }
+.tab-group.is-joined > .toptab + .toptab::before { content: ""; position: absolute; left: 0; top: 7px; bottom: 7px; width: 1px; background: var(--line); }
+.tab-group.is-joined > .toptab:is(.is-active, .is-shown)::before, .tab-group.is-joined > .toptab:is(.is-active, .is-shown) + .toptab::before { display: none; }
+.toptab-dirty { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+.toptab {
+  -webkit-app-region: no-drag; position: relative; flex: 0 1 auto; width: 230px; min-width: 64px; height: 26px; display: flex; align-items: center; gap: 7px;
+  padding: 0 6px 0 10px; border-radius: 7px; font: 11.5px var(--mono); color: var(--dim);
+}
+.toptab:hover { background: color-mix(in srgb, var(--surface) 70%, transparent); }
+.toptab.is-active { background: var(--surface); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); }
+/* Side by side with the tab that has the keyboard: on screen too, marked more quietly. */
+.toptab.is-shown { background: color-mix(in srgb, var(--surface) 55%, transparent); color: var(--text); }
+/* A file's tab sits after the terminals it was opened from. */
+.toptab.filetab { width: 150px; }
+.tab-file { flex: none; display: grid; place-items: center; width: 9px; margin: 0 -1px; color: var(--faint); }
+.toptab.is-active .tab-file, .toptab.is-shown .tab-file { color: var(--dim); }
+.toptab-text { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* A file's tab gives its name the room: when the folder and the name do not both fit, the folder wraps onto a line above that is clipped away. */
+.toptab-text.is-file { display: flex; flex-wrap: wrap; align-content: flex-end; height: 16px; line-height: 16px; }
+.toptab-text.is-file .top-dir { flex: none; white-space: pre; }
+.toptab-text.is-file .top-app { flex: 0 1 auto; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.toptab:not(.is-active, .is-shown) .top-app { color: var(--dim); }
+.toptab:not(.is-active, .is-shown) .top-dir { color: var(--faint); }
+.toptab-key { flex: none; font: 10.5px var(--mono); color: var(--faint); }
+.toptab-key::before { content: attr(data-key); }
+.toptab-close { flex: none; display: none; width: 17px; height: 17px; place-items: center; border-radius: 4px; color: var(--dim); }
+.toptab-close:hover { background: var(--surface-hi); color: var(--text); }
+.toptab:hover .toptab-close { display: grid; }
+.toptab:hover .toptab-key { display: none; }
+.top-actions { display: flex; align-items: center; gap: 2px; }
+/* What the tab in front shows: a note rendered or raw, the editor's side, one side or both. */
+.view-tools { -webkit-app-region: no-drag; display: flex; align-items: center; gap: 2px; margin-right: 6px; }
+.view-tools .seg { margin-right: 4px; }
+.view-tools .seg button { display: grid; place-items: center; width: 26px; height: 22px; padding: 0; }
+.top-btn { -webkit-app-region: no-drag; flex: none; width: 26px; height: 24px; display: grid; place-items: center; border-radius: 5px; color: var(--faint); }
+.top-btn:hover { color: var(--text); background: var(--surface); }
+.stack { flex: 1; min-height: 0; position: relative; }
+.tab-area { position: absolute; inset: 0; visibility: hidden; pointer-events: none; }
+.tab-area.is-active { visibility: visible; pointer-events: auto; }
+.pane {
+  position: absolute; overflow: hidden;
+  /* When a split opens or closes, the other panes glide to their new size. Terminals refit once they settle. */
+  transition: left var(--enter) var(--ease-out), top var(--enter) var(--ease-out), width var(--enter) var(--ease-out), height var(--enter) var(--ease-out);
+}
+.divider { position: absolute; z-index: 6; }
+.divider::after { content: ""; position: absolute; background: var(--line); transition: background 0.12s; }
+.divider.is-row { width: 9px; margin-left: -4px; cursor: col-resize; }
+.divider.is-row::after { left: 4px; top: 0; bottom: 0; width: 1px; }
+.divider.is-col { height: 9px; margin-top: -4px; cursor: row-resize; }
+.divider.is-col::after { top: 4px; left: 0; right: 0; height: 1px; }
+.divider:hover::after, body.is-resizing .divider:active::after { background: var(--accent); }
+
+/* ---------- sidebar ---------- */
+.sidebar-slot { flex: none; position: relative; border-right: 1px solid var(--line); transition: width 0.24s var(--ease-out), border-color 0.24s, background-color 0.32s ease; }
+.sidebar-slot:not(.is-open) { border-right-color: transparent; }
+.sidebar-clip { position: absolute; inset: 0; overflow: hidden; }
+/* Pinned to the slot's right edge, so it slides out from behind the left side of the window as the slot widens. */
+.sidebar { position: absolute; top: 0; bottom: 0; right: 0; max-width: none; display: flex; flex-direction: column; transition: opacity 0.2s ease, transform 0.24s var(--ease-out); }
+.sidebar-slot:not(.is-open) .sidebar { opacity: 0; transform: translateX(-10px); }
+.sidebar-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.sidebar-resize { position: absolute; top: 0; bottom: 0; right: -4px; width: 8px; cursor: col-resize; z-index: 7; }
+
+.tab-mark { flex: none; width: 7px; height: 7px; border-radius: 50%; border: 1.3px solid var(--faint); }
+.toptab.is-active .tab-mark, .toptab.is-shown .tab-mark { border-color: var(--dim); }
+.tab-mark.is-running { border-color: var(--neon); background: var(--neon); box-shadow: 0 0 7px var(--neon); animation: pulse 1.6s ease-in-out infinite; }
+.tab-mark.is-failed { border-color: var(--err); background: var(--err); }
+.tab-mark.is-ok { border-color: var(--ok); background: var(--ok); }
+/* A command finished on a tab you are not looking at: the tab flashes once, then keeps its coloured mark until you visit. */
+.toptab.is-finished { animation: tab-flash 1.8s ease-in-out 1; }
+.toptab.is-finished .top-app { color: var(--text); }
+@keyframes tab-flash { 20%, 65% { background: color-mix(in srgb, var(--neon) 34%, transparent); box-shadow: 0 0 0 1px var(--neon), 0 0 14px color-mix(in srgb, var(--neon) 60%, transparent); } }
+.toptab.is-finished.is-failed { animation-name: tab-flash-failed; }
+@keyframes tab-flash-failed { 20%, 65% { background: color-mix(in srgb, var(--err) 34%, transparent); box-shadow: 0 0 0 1px var(--err), 0 0 14px color-mix(in srgb, var(--err) 55%, transparent); } }
+
+.side-title { flex: none; display: flex; align-items: center; gap: 4px; padding: 8px 8px 6px 14px; color: var(--dim); font-weight: 600; }
+.side-title span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.side-title button, .side-foot button { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 4px; color: var(--faint); }
+.side-title button:hover, .side-title button.is-on, .side-foot button:hover, .side-foot button.is-on { color: var(--text); background: var(--surface); }
+.side-foot { flex: none; display: flex; align-items: center; justify-content: flex-start; gap: 4px; padding: 6px 8px 8px; border-top: 1px solid var(--line); }
+/* The navigator's text size; Settings > Font sizes sets --sidebar-size. */
+.sidebar { font-size: var(--sidebar-size, calc(12px + 0.5pt)); }
+.side-note { padding: 8px 14px; color: var(--faint); }
+.filetree, .searchpanel { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.tree-scroll { flex: 1; min-height: 0; overflow: auto; padding-bottom: 12px; }
+.treerow { display: flex; align-items: center; gap: 3px; height: 23px; padding-right: 8px; color: var(--text); white-space: nowrap; }
+.treerow:hover { background: color-mix(in srgb, var(--surface) 70%, transparent); color: var(--text); }
+.treerow.is-active { background: var(--surface); color: var(--text); }
+.treerow.is-selected, .treerow.is-selected:hover { background: color-mix(in srgb, var(--accent) 24%, transparent); }
+.tree-arrow { flex: none; width: 14px; display: grid; place-items: center; color: var(--faint); transition: transform 0.1s; }
+.tree-arrow.is-open { transform: rotate(90deg); }
+.tree-name { overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
+.tree-name.is-dir { color: var(--text); }
+.tree-rename { flex: 1; min-width: 0; height: 19px; padding: 0 4px; margin-left: -5px; border-radius: 4px; border: 1px solid var(--accent); background: var(--bg-deep); outline: 0; font-weight: 500; }
+
+.search-box { flex: none; display: flex; align-items: center; gap: 2px; margin: 0 8px; padding: 0 4px 0 9px; height: 28px; border-radius: var(--radius); background: var(--surface); border: 1px solid var(--line); }
+.search-box:focus-within { border-color: color-mix(in srgb, var(--accent) 60%, var(--line)); }
+.search-box input { flex: 1; min-width: 0; background: none; border: 0; outline: 0; }
+.search-box input::placeholder, .findbar input::placeholder, .palette input::placeholder { color: var(--faint); }
+.search-box button { width: 22px; height: 20px; border-radius: 4px; font: 10.5px var(--mono); color: var(--faint); }
+.search-box button:hover { color: var(--text); }
+.search-box button.is-on { color: var(--bg-deep); background: var(--accent); }
+.search-status { flex: none; padding: 7px 14px 6px; font-size: 11.5px; color: var(--faint); }
+.hit-head { display: flex; align-items: baseline; gap: 5px; height: 23px; padding: 0 8px 0 10px; white-space: nowrap; }
+.hit-head .tree-arrow { align-self: center; }
+.hit-head:hover { background: color-mix(in srgb, var(--surface) 70%, transparent); }
+.hit-name { color: var(--text); font-weight: 550; }
+.hit-dir { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 11px; color: var(--faint); }
+.hit-count { font-size: 10.5px; color: var(--faint); }
+.hit-line { display: flex; gap: 8px; height: 21px; align-items: center; padding: 0 8px 0 26px; font: 11px var(--mono); color: var(--dim); white-space: nowrap; }
+.hit-line:hover { background: var(--surface); color: var(--text); }
+.hit-no { flex: none; min-width: 22px; text-align: right; color: var(--faint); }
+.hit-text { overflow: hidden; text-overflow: ellipsis; }
+.hit-text mark { background: color-mix(in srgb, var(--accent) 32%, transparent); color: var(--text); border-radius: 2px; }
+
+/* ---------- terminal ---------- */
+.term-pane, .editor-pane { position: absolute; inset: 0; display: flex; flex-direction: column; }
+/* Only the app gaining or losing focus changes any of these. */
+.editor-pane, .topbar { transition: background-color 0.32s ease; }
+.editor-pane { background: color-mix(in srgb, var(--bg-deep) calc(var(--editor-layer) * 100%), transparent); }
+.sidebar-slot, .topbar { background: color-mix(in srgb, var(--bg-deep) calc(var(--chrome-layer) * 100%), transparent); }
+.term-area { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+.term-host { position: absolute; inset: 0; }
+.term-host .xterm { height: 100%; padding: 8px 2px 0 20px; }
+.term-host .xterm-viewport { background: transparent !important; }
+
+.blk-layer { position: absolute; left: 0; right: 0; overflow: hidden; pointer-events: none; z-index: 3; }
+.blk { position: absolute; left: 0; right: 0; top: 0; }
+.blk::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 1px; background: var(--line); }
+.blk.is-selected { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.blk.is-failed { background: color-mix(in srgb, var(--err) 6%, transparent); }
+.blk-head {
+  position: relative; z-index: 1; height: var(--row); display: flex; align-items: center; gap: 12px;
+  padding: 0 10px 0 var(--gutter); font: 11px var(--mono); color: var(--faint); pointer-events: auto; white-space: nowrap;
+}
+.blk-cwd { overflow: hidden; text-overflow: ellipsis; }
+.blk-branch { color: var(--faint); }
+.blk-branch::before { content: "on "; opacity: 0.7; }
+.blk-cmd { display: none; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font: 700 11.5px var(--mono); color: var(--text); }
+.blk-meta { margin-left: auto; font-variant-numeric: tabular-nums; }
+.blk.is-failed .blk-meta { color: var(--err); }
+.blk.is-running .blk-meta { color: var(--neon); }
+.blk-actions { display: none; gap: 1px; margin-right: -4px; }
+.blk-head:hover .blk-actions, .blk.is-selected .blk-actions { display: flex; }
+.blk-actions button { width: 20px; height: 18px; display: grid; place-items: center; border-radius: 4px; color: var(--dim); }
+.blk-actions button:hover { color: var(--text); background: var(--surface-hi); }
+.blk.is-pinned .blk-head { background: var(--surface); box-shadow: 0 1px 0 var(--line); color: var(--dim); }
+.blk.is-pinned .blk-cmd { display: block; }
+.blk.is-pinned .blk-cwd, .blk.is-pinned .blk-branch { display: none; }
+.blk-stripe { position: absolute; left: 8px; top: 4px; bottom: 3px; width: 2px; border-radius: 1px; }
+.blk.is-selected .blk-stripe { background: var(--accent); }
+.blk.is-failed .blk-stripe { background: var(--err); }
+/* Under your own prompt the block has no header row of ours: the prompt already says where you are.
+   Its tools appear on hover, and the pinned header still shows the command when you scroll into a long block. */
+.blk.is-native::before { display: none; }
+.blk.is-native .blk-head { pointer-events: none; }
+.blk.is-native .blk-cwd, .blk.is-native .blk-branch, .blk.is-native .blk-meta { display: none; }
+.blk.is-native .blk-actions { display: flex; margin-left: auto; padding: 1px 3px; border-radius: 5px; background: var(--surface); border: 1px solid var(--line); opacity: 0; pointer-events: auto; transition: opacity 0.12s; }
+.blk.is-native .blk-head:hover .blk-actions, .blk.is-native.is-selected .blk-actions, .blk.is-native .blk-actions:hover { opacity: 1; }
+.blk.is-native.is-pinned .blk-head { pointer-events: auto; }
+.blk.is-native.is-pinned .blk-meta { display: inline; margin-left: 0; }
+.blk.is-native.is-pinned .blk-actions { opacity: 1; margin-left: 0; background: none; border: 0; }
+@keyframes pulse { 50% { opacity: 0.35; } }
+
+.cmd-input {
+  position: absolute; left: 0; right: 0; top: 0; z-index: 4; min-height: calc(var(--row, 17px) * 3);
+  display: flex; flex-direction: column; justify-content: flex-end;
+}
+.cmd-input.is-hidden { visibility: hidden; pointer-events: none; }
+/* Moved off its natural rows it sits over output, so give it something to hide that output with. */
+.cmd-input.is-floating { background: color-mix(in srgb, var(--bg) 86%, transparent); backdrop-filter: blur(16px); box-shadow: 0 -1px 0 var(--line); }
+.cmd-input::after { content: ""; position: absolute; left: 8px; bottom: 3px; width: 2px; height: calc(100% - var(--row, 17px) * 2 - 5px); min-height: 10px; border-radius: 1px; background: var(--accent); }
+/* With your own prompt, the input is just the typing area at the shell's cursor. */
+.cmd-input.is-native { right: auto; min-height: var(--row, 17px); }
+.cmd-input.is-native::after, .cmd-input.is-native .cmd-chips { display: none; }
+.cmd-input.is-native .cmd-editor { margin: 0; }
+.cmd-input.is-native.is-floating { border-radius: 5px; padding: 2px 6px; }
+.cmd-chips {
+  position: relative; flex: none; height: var(--row, 17px); display: flex; align-items: center; gap: 12px;
+  padding: 0 10px 0 var(--gutter, 20px); font: 11px var(--mono); color: var(--dim); white-space: nowrap; overflow: hidden;
+}
+.cmd-chips::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 1px; background: var(--line); }
+.chip-branch { display: flex; align-items: center; gap: 4px; color: var(--faint); }
+.chip-branch i { font-style: normal; margin-left: 4px; color: var(--accent); }
+.chip-exit { color: var(--err); }
+.cmd-editor { flex: none; margin-left: var(--gutter, 20px); margin-right: 10px; min-height: var(--row, 17px); }
+.cmd-editor .monaco-editor, .cmd-editor .monaco-editor-background, .cmd-editor .margin { background: transparent !important; outline: 0 !important; }
+.cmd-editor .monaco-editor .view-line { letter-spacing: 0 !important; }
+/* Monaco draws its own caret. The browser also paints one on Monaco's hidden typing element, and when text is put
+   in without typing (keys held while a new shell starts) that one stays at column 1 as a second, white caret. */
+.monaco-editor .native-edit-context { caret-color: transparent !important; }
+.monaco-editor .monaco-placeholder, .monaco-editor .editorPlaceholder { color: var(--faint) !important; font-weight: 400 !important; font-style: normal !important; }
+
+.findbar { position: absolute; top: 8px; right: 14px; z-index: 6; display: flex; align-items: center; gap: 2px; padding: 3px 4px 3px 10px; border-radius: 7px; background: var(--surface); border: 1px solid var(--line); box-shadow: 0 6px 20px rgb(0 0 0 / 0.28); }
+.findbar input { width: 190px; background: none; border: 0; outline: 0; }
+.findbar button { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 4px; color: var(--dim); }
+.findbar button:hover { background: var(--surface-hi); color: var(--text); }
+.find-none { font-size: 11px; color: var(--err); margin-right: 4px; }
+
+/* ---------- editor ---------- */
+.seg { display: flex; padding: 2px; border-radius: 6px; background: var(--surface); }
+.seg button { padding: 1px 9px; border-radius: 4px; font-size: 11.5px; color: var(--faint); }
+.seg button.is-on { background: var(--surface-hi); color: var(--text); }
+.crumbs { flex: none; display: block; width: 100%; text-align: left; padding: 5px 14px 0; font-size: 11px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.crumbs:hover { color: var(--dim); }
+.editor-body { position: relative; flex: 1; min-height: 0; outline: 0; }
+.editor-host { position: absolute; inset: 0; }
+/* When the editor fills the tab, a note sits in a column in the middle. The raw column is wider by its line numbers, so the text starts where the rendered text does. */
+.editor-pane.is-centered .editor-host.is-note { left: max(0px, calc(50% - 25rem)); right: auto; width: min(100%, 50rem); }
+.editor-pane.is-centered :is(.rich-head, .rich-note, .milkdown) { margin-left: auto; margin-right: auto; }
+.editor-error { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--dim); padding: 24px; text-align: center; }
+.editor-error p { margin: 0; max-width: 34em; }
+.editor-error button { padding: 5px 12px; border-radius: 6px; background: var(--surface); border: 1px solid var(--line); }
+.editor-error button:hover { background: var(--surface-hi); }
+
+.markdown { position: absolute; inset: 0; overflow: auto; padding: 26px 40px 0; user-select: text; cursor: text; font: 500 calc(14px * var(--notes-size, 1))/1.62 var(--notes, -apple-system, BlinkMacSystemFont, sans-serif); }
+.markdown .milkdown { max-width: 44rem; position: relative; }
+.markdown .rich { outline: 0; min-height: 60vh; padding-bottom: 40vh; white-space: pre-wrap; word-wrap: break-word; caret-color: var(--accent); }
+/* The rendered view's caret is drawn (richEditing.ts) so it can glide as Monaco's does; the browser's own is hidden while it shows. */
+.markdown .milkdown.has-caret .rich { caret-color: transparent; }
+.rich-caret { position: absolute; left: 0; top: 0; width: 2px; height: 0; background: var(--accent); opacity: 0; pointer-events: none; z-index: 2; will-change: transform; }
+.rich-caret.is-on { opacity: 1; }
+.rich-caret.is-smooth { transition: transform 80ms, height 80ms; }
+.rich-caret.is-on.is-blinking { animation: rich-caret-blink 0.5s ease-in-out 0s 20 alternate; }
+@keyframes rich-caret-blink { 0%, 20% { opacity: 1; } 60%, to { opacity: 0; } }
+.rich-note { max-width: 44rem; margin: 0 0 18px; padding: 8px 12px; border-radius: 6px; background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--text); font: 12px/1.45 var(--mono); cursor: default; }
+.rich > :first-child { margin-top: 0; }
+/* The file's name above a rendered note, without its extension: the heading face of rendered notes (Literata by default), medium weight, large, greyed, slanted and greyed almost into the background, so it reads as a trace rather than a heading. Editing it renames the file. */
+.rich-head { max-width: 44rem; }
+.rich-head.is-beside { height: 0; }
+.rich-head.is-beside .rich-title { position: relative; z-index: 1; margin: 0 0 0 auto; white-space: nowrap; transform-origin: 100% 0; }
+.rich-title { width: fit-content; min-width: 1ch; max-width: 100%; margin: 0 0 0.6em auto; outline: 0; font: italic 500 calc(1.8em + 8pt)/1.25 var(--notes-heading, "Literata Variable", Georgia, serif); letter-spacing: 0; text-align: right; color: color-mix(in srgb, var(--faint) 50%, transparent); transform: skewX(-7deg); transform-origin: 100% 100%; caret-color: var(--accent); word-wrap: break-word; }
+.rich-title:empty::before { content: "Untitled"; color: color-mix(in srgb, var(--faint) 28%, transparent); }
+.rich-title ::selection, .rich-title::selection { background: var(--selection); }
+.rich h1, .rich h2, .rich h3, .rich h4, .rich h5, .rich h6 { font-family: var(--notes-heading, "Literata Variable", Georgia, serif); line-height: 1.25; margin: 0.8em 0 0.5em; font-weight: 600; letter-spacing: -0.005em; }
+.rich strong { font-weight: 700; }
+/* Six levels in even steps of 0.16em, from 1.8em down to body size, so each one reads as its own level. */
+.rich h1 { font-size: 1.8em; }
+.rich h2 { font-size: 1.64em; }
+.rich h3 { font-size: 1.48em; }
+.rich h4 { font-size: 1.32em; }
+.rich h5 { font-size: 1.16em; }
+.rich h6 { font-size: 1em; }
+.rich p, .rich ul, .rich ol, .rich blockquote, .rich pre, .rich table { margin: 0 0 0.9em; }
+.rich li > p { margin: 0; }
+.rich li > ul, .rich li > ol { margin: 0.2em 0 0; }
+.rich a { color: var(--info); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; }
+.rich code { font: 0.88em var(--mono); padding: 0.1em 0.35em; border-radius: 4px; background: var(--surface); }
+.rich pre { padding: 12px 14px; border-radius: 7px; background: var(--bg-deep); border: 1px solid var(--line); overflow: auto; white-space: pre; }
+.rich pre code { padding: 0; background: none; font-size: 12px; line-height: 1.5; }
+/* A stretch of the file shown as its Markdown source, because the rendered view has no block for it. */
+.rich pre[data-language="astrolabe:source"] { position: relative; padding-top: 22px; background: none; border-style: dashed; white-space: pre-wrap; }
+.rich pre[data-language="astrolabe:source"]::before { content: "markdown source"; position: absolute; top: 5px; left: 14px; font: 10px/1 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); }
+.rich blockquote { padding-left: 14px; border-left: 2px solid var(--accent); color: var(--dim); }
+.rich ul, .rich ol { padding-left: 1.5em; }
+.rich li { margin: 0.2em 0; }
+/* Numbered lists count 1. then a. then i. as they nest, and so on round again. */
+.rich ol { list-style-type: decimal; }
+.rich ol ol { list-style-type: lower-alpha; }
+.rich ol ol ol { list-style-type: lower-roman; }
+.rich ol ol ol ol { list-style-type: decimal; }
+.rich ol ol ol ol ol { list-style-type: lower-alpha; }
+.rich ol ol ol ol ol ol { list-style-type: lower-roman; }
+.rich li::marker { color: var(--dim); }
+.rich li[data-item-type="task"] { list-style: none; position: relative; padding-left: 0.3em; }
+.rich li[data-item-type="task"]::before {
+  content: ""; position: absolute; left: calc(-1.6em + 1px); top: calc(0.26em + 1px); width: 12px; height: 12px; border-radius: 3.5px;
+  border: 1.5px solid var(--faint); cursor: default;
+}
+/* Two layers: the tick, and under it the fill, which is what grows and shrinks when the box changes. */
+.rich li[data-item-type="task"][data-checked="true"]::before {
+  border-color: var(--accent);
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='%23151929' stroke-width='1.3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2.5 6.2l2.3 2.3 4.7-5'/%3E%3C/svg%3E") center / 12px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) center / 100% 100% no-repeat;
+}
+/* Just ticked: the colour spreads out from the middle of the box. Just unticked: it drains back in. (140ms; `TICK_MS` in richMarkdown.ts.) */
+.rich li.is-ticking::before { animation: task-fill 0.14s ease-out; }
+.rich li.is-unticking::before { animation: task-empty 0.14s ease-out; }
+@keyframes task-fill { from { background-size: 12px, 0 0; border-color: var(--faint); } }
+@keyframes task-empty {
+  from { background: linear-gradient(var(--accent), var(--accent)) center / 100% 100% no-repeat; border-color: var(--accent); }
+  to { background: linear-gradient(var(--accent), var(--accent)) center / 0 0 no-repeat; border-color: var(--faint); }
+}
+.rich li[data-item-type="task"][data-checked="true"] > p { color: var(--faint); text-decoration: line-through; }
+/* A toggle: the arrow is drawn in the space left of its title, and a closed one shows its title only. */
+.rich .toggle { position: relative; margin: 0 0 0.9em; padding-left: 1.5em; }
+.rich .toggle::before { content: ""; position: absolute; left: 0; top: 0; width: 1.3em; height: 1.62em; background: var(--dim); clip-path: polygon(36% 34%, 68% 50%, 36% 66%); cursor: pointer; transition: transform 0.12s ease; }
+.rich .toggle[data-open="true"]::before { transform: rotate(90deg); }
+.rich .toggle:hover::before { background: var(--text); }
+.rich .toggle[data-open="false"] > :not(.toggle-summary) { display: none; }
+.rich .toggle-summary { margin: 0 0 0.3em; }
+.rich .toggle > :last-child { margin-bottom: 0; }
+.rich .toggle-summary:has(> br:only-child)::before { content: "Toggle"; position: absolute; color: var(--faint); pointer-events: none; }
+.rich hr { border: 0; height: 1px; background: var(--line); margin: 1.8em 0; }
+.rich table { border-collapse: collapse; font-size: 0.93em; }
+.rich th, .rich td { padding: 5px 11px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
+.rich th { background: var(--surface); font-weight: 600; }
+.rich img { max-width: 100%; }
+.rich ::selection { background: var(--selection); }
+.rich .ProseMirror-selectednode { outline: 1.5px solid var(--accent); }
+
+/* ---------- palette, toast ---------- */
+.palette-scrim { position: fixed; inset: 0; z-index: 50; display: flex; justify-content: center; align-items: flex-start; padding-top: 13vh; background: rgb(0 0 0 / 0.22); }
+.palette { width: min(580px, 84vw); border-radius: 10px; background: var(--surface); border: 1px solid var(--line); box-shadow: 0 24px 70px rgb(0 0 0 / 0.5); overflow: hidden; }
+.palette input { display: block; width: 100%; padding: 12px 15px; background: none; border: 0; border-bottom: 1px solid var(--line); outline: 0; font-size: 14px; }
+.palette-list { max-height: 46vh; overflow-y: auto; padding: 5px; }
+.palette-row { display: flex; align-items: baseline; gap: 10px; padding: 6px 10px; border-radius: 6px; white-space: nowrap; color: var(--dim); }
+.palette-row.is-selected { background: var(--surface-hi); color: var(--text); }
+.palette-row.is-mono .palette-label { font: 12px var(--mono); }
+.palette-label { flex: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.palette-label b { color: var(--accent); font-weight: 600; }
+.palette-detail { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 11.5px; color: var(--faint); }
+.palette-row kbd { margin-left: auto; }
+.palette-empty { padding: 14px 10px; color: var(--faint); }
+.toast { position: fixed; z-index: 60; left: 50%; bottom: 26px; transform: translateX(-50%); padding: 6px 13px; border-radius: 7px; background: var(--surface-hi); border: 1px solid var(--line); box-shadow: 0 8px 26px rgb(0 0 0 / 0.35); font-size: 12px; animation: toast-in 0.14s ease-out; }
+.tooltip { position: fixed; z-index: 70; display: flex; align-items: center; gap: 9px; padding: 4px 8px; border-radius: 6px; background: var(--surface-hi); border: 1px solid var(--line); box-shadow: 0 6px 20px rgb(0 0 0 / 0.35); font-size: 11.5px; color: var(--text); white-space: nowrap; pointer-events: none; }
+.tooltip kbd { color: var(--dim); }
+@keyframes toast-in { from { opacity: 0; transform: translate(-50%, 5px); } }
+
+.monaco-editor :focus-visible, .monaco-editor .native-edit-context { outline: 0 !important; }
+.astro-overflow { position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 40; }
+.monaco-editor .suggest-widget { border-radius: 7px !important; overflow: hidden; }
+
+/* ---------- opening and closing ---------- */
+/* Entrances only fade and slide, never scale: a new terminal measures its character size while it appears. */
+.pane.is-entering { animation: pane-in var(--enter) var(--ease-out); }
+@keyframes pane-in { from { opacity: 0; transform: translate(var(--in-x, 0), var(--in-y, 0)); } }
+.pane.is-leaving { z-index: 5; pointer-events: none; animation: pane-out var(--exit) ease-in forwards; }
+@keyframes pane-out { to { opacity: 0; transform: scale(0.97); } }
+
+.tab-area.is-entering { animation: area-in var(--enter) var(--ease-out); }
+@keyframes area-in { from { opacity: 0; transform: translateY(6px); } }
+/* A closed tab you were looking at fades out over the tab that takes its place. */
+.tab-area.is-leaving { visibility: visible; z-index: 2; pointer-events: none; animation: area-out var(--exit) ease-in forwards; }
+@keyframes area-out { to { opacity: 0; transform: scale(0.985); } }
+
+.toptab.is-entering { overflow: hidden; animation: toptab-in var(--enter) var(--ease-out); }
+@keyframes toptab-in { from { width: 0; min-width: 0; padding-left: 0; padding-right: 0; opacity: 0; } 40% { opacity: 0; } }
+.toptab.is-leaving { overflow: hidden; pointer-events: none; animation: toptab-out var(--exit) ease-in forwards; }
+@keyframes toptab-out { 60% { opacity: 0; } to { width: 0; min-width: 0; padding-left: 0; padding-right: 0; opacity: 0; } }
+/* A block whose only tab is closing gives up its share of the row's spacing as it goes. */
+.tab-group:has(> .toptab.is-leaving:only-child) { animation: group-out var(--exit) ease-in forwards; }
+@keyframes group-out { to { margin-right: -7px; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .pane, .sidebar-slot, .sidebar { transition: none; }
+  .pane.is-entering, .tab-area.is-entering, .toptab.is-entering, .tab-group { animation: none; }
+  .toptab.is-finished { animation: none; box-shadow: 0 0 0 1px var(--neon); }
+  .app { transition: none; }
+  .rich-caret.is-smooth { transition: none; }
+  .tab-mark.is-running { animation: none; }
+  .toast { animation: none; }
+  .tree-arrow, .divider::after { transition: none; }
+  .rich li.is-ticking::before, .rich li.is-unticking::before { animation: none; }
+}
