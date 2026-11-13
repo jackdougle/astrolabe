@@ -1,5 +1,6 @@
-// A note's title has faint traces running out from its letters, on a row of its own or beside the first line (the
-// last number of `layout` is how many start at a letter). The traces keep out of every line of the text, find their way into what the note leaves open (they are laid out
+// A note's title has faint traces running out from its words, on a row of its own or beside the first line (the
+// last number of `layout` is how many start at the words' shape; `aboveTitle` and `rightOfTitle` are how far any
+// ink reaches past the title's top and right, which only short stubs do). The traces keep out of every line of the text, find their way into what the note leaves open (they are laid out
 // again as the text changes shape), are the same each time a file is opened and differ between files, and fade with
 // their distance from the word.
 import fs from 'node:fs';
@@ -21,14 +22,15 @@ export default async function ({ page, run, type, work, shot }) {
     for (let n = walker.nextNode(); n; n = walker.nextNode()) { range.selectNodeContents(n); for (const r of range.getClientRects()) if (r.width > 0 && r.height > 1) lines.push(r); }
     const inBox = (x, y, b, pad) => x > (b.left - cr.left + pad) * k && x < (b.right - cr.left - pad) * k && y > (b.top - cr.top + pad) * k && y < (b.bottom - cr.top - pad) * k;
     const tx = ((t.left + t.right) / 2 - cr.left) * k, ty = ((t.top + t.bottom) / 2 - cr.top) * k;
-    let inked = 0, max = 0, onTitle = 0, onText = 0, sum = 0; const rings = [0, 0, 0, 0]; const ringN = [0, 0, 0, 0];
+    let inked = 0, max = 0, onTitle = 0, onText = 0, sum = 0, up = 0, right = 0; const rings = [0, 0, 0, 0]; const ringN = [0, 0, 0, 0];
     for (let y = 0; y < c.height; y++) for (let x = 0; x < c.width; x++) {
       const a = d[(y * c.width + x) * 4 + 3]; if (!a) continue;
       inked++; sum += a; if (a > max) max = a;
+      if (a > 12) { up = Math.max(up, (t.top - cr.top) - y / k); right = Math.max(right, x / k - (t.right - cr.left)); }
       if (inBox(x, y, t, 6)) onTitle++; if (lines.some((p) => inBox(x, y, p, 0))) onText++;
       const dist = Math.hypot(x - tx, y - ty) / k; const ring = Math.min(3, Math.floor(dist / 120)); if (a > rings[ring]) rings[ring] = a; ringN[ring]++;
     }
-    return { beside: document.querySelector('.rich-head').classList.contains('is-beside'), layout: c.dataset.layout, size: `${Math.round(cr.width)}x${Math.round(cr.height)}`, inked, strongest: +(max / 255).toFixed(2), byDistance: rings.map((v) => +(v / 255).toFixed(2)), onTitle, onText };
+    return { beside: document.querySelector('.rich-head').classList.contains('is-beside'), layout: c.dataset.layout, aboveTitle: Math.round(up), rightOfTitle: Math.round(right), size: `${Math.round(cr.width)}x${Math.round(cr.height)}`, inked, strongest: +(max / 255).toFixed(2), byDistance: rings.map((v) => +(v / 255).toFixed(2)), onTitle, onText };
   });
   await open('field notes'); await page.waitForTimeout(800); const a = await look(); console.log('field notes, title above:', JSON.stringify(a)); await shot('wires-beside-terminal');
   await open('reactor'); const b = await look(); console.log('reactor:', JSON.stringify(b), '| a different pattern:', a?.layout !== b?.layout);

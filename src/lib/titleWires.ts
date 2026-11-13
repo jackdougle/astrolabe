@@ -1,6 +1,7 @@
 // The faint traces that run out from a note's title: lines laid out as the copper on a circuit board is, on a grid,
-// turning only by 45 degrees, leaving the title as the pins of a chip do, running in parallel bundles that peel
-// apart, and ending in vias and pads. They are drawn for each file from its name, so a file keeps its own pattern,
+// turning only by 45 degrees, leaving the title as the pins of a chip do (from the edge of the words' own shape,
+// made a little bigger: never from inside a letter, nor from a box round the title), running leftwards and
+// downwards in parallel bundles that peel apart, with only short stubs over the top and off the right-hand end, and ending in vias and pads. They are drawn for each file from its name, so a file keeps its own pattern,
 // and they thin out and cool in colour as they leave the word. They keep out of the note's text line by line, so
 // they find their way into whatever a note leaves open: above it, in its margins, past the ends of its short lines.
 export interface Box { left: number; top: number; right: number; bottom: number }
@@ -44,33 +45,77 @@ interface Step { dir: number; len: number; off?: number }
 /** `from`: where the line meets its letter, when that is not the middle of its first cell. */
 interface Trace { cells: [number, number][]; end: 'via' | 'pad' | 'fade'; pulse: number; from?: [number, number] }
 
-const INK = 96; // how opaque a pixel of the title has to be to count as letter
-const REACH_IN = 5; // how many cells a line from the side crosses to reach a letter: further, and it reads as a rule over the word
-/** The title's letters drawn as the page draws them, as each pixel's opacity, over a stretch of the grid that starts
- *  at (x0, y0). Null when there is nothing to draw. */
-function inkOf(scene: WireScene) {
+const INK = 96; // how opaque a pixel has to be to count
+const PAD = 4; // the clear space kept round the letters, in pixels: the lines start at its edge
+const CLOSE = 9; // hollows and gaps narrower than about twice this are filled in: the inside of an n, the space between two letters
+const REACH_IN = 5; // how many cells a line from the side crosses to reach the word: further, and it reads as a rule over it
+interface Ink { x0: number; y0: number; w: number; h: number; alpha: Uint8Array }
+let inkCache: { key: string; ink: Ink | null } | null = null;
+/** The shape the lines start from and never enter: the title's words as the page draws them, made a little bigger
+ *  all round (so that the shape follows their curves at a small distance) with the hollows in and between the
+ *  letters filled, so that no line runs up inside one. A pixel is 255 inside it and 0 outside, over a stretch of
+ *  the grid that starts at (x0, y0). Null when there is nothing to draw. */
+function inkOf(scene: WireScene): Ink | null {
   const g = scene.glyphs;
   if (!g || !g.text.trim()) return null;
-  const pad = PITCH * 2;
-  const x0 = Math.max(0, Math.floor((scene.title.left - pad) / PITCH) * PITCH), y0 = Math.max(0, Math.floor((scene.title.top - pad) / PITCH) * PITCH);
-  const w = Math.ceil((scene.title.right + pad - x0) / PITCH) * PITCH, h = Math.ceil((scene.title.bottom + pad - y0) / PITCH) * PITCH;
-  if (w <= 0 || h <= 0 || w * h > 4e6) return null;
-  const canvas = document.createElement('canvas');
-  canvas.width = w; canvas.height = h;
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  if (!ctx) return null;
-  const [a, b, c, d, e, f] = g.matrix;
-  ctx.setTransform(a, b, c, d, e - x0, f - y0);
-  ctx.font = g.font;
-  ctx.textBaseline = 'alphabetic';
-  ctx.fillText(g.text, g.x, g.baseline);
-  const data = ctx.getImageData(0, 0, w, h).data;
-  const alpha = new Uint8Array(w * h);
-  for (let i = 0; i < alpha.length; i++) alpha[i] = data[i * 4 + 3];
-  return { x0, y0, w, h, alpha };
+  const key = JSON.stringify([g, scene.title]);
+  if (inkCache?.key === key) return inkCache.ink; // the note changes far more often than its title
+  const made = ((): Ink | null => {
+    const pad = PITCH * 3;
+    const x0 = Math.max(0, Math.floor((scene.title.left - pad) / PITCH) * PITCH), y0 = Math.max(0, Math.floor((scene.title.top - pad) / PITCH) * PITCH);
+    const w = Math.ceil((scene.title.right + pad - x0) / PITCH) * PITCH, h = Math.ceil((scene.title.bottom + pad - y0) / PITCH) * PITCH;
+    if (w <= 0 || h <= 0 || w * h > 4e6) return null;
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return null;
+    const [a, b, c, d, e, f] = g.matrix;
+    /** The words with `grow` pixels added all round, as 1 or 0 a pixel. */
+    const grown = (grow: number) => {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+      ctx.setTransform(a, b, c, d, e - x0, f - y0);
+      ctx.font = g.font;
+      ctx.textBaseline = 'alphabetic';
+      ctx.lineJoin = 'round';
+      ctx.lineWidth = grow * 2;
+      ctx.fillText(g.text, g.x, g.baseline);
+      ctx.strokeText(g.text, g.x, g.baseline);
+      const data = ctx.getImageData(0, 0, w, h).data;
+      const out = new Uint8Array(w * h);
+      for (let i = 0; i < out.length; i++) out[i] = data[i * 4 + 3] > INK ? 1 : 0;
+      return out;
+    };
+    // Grown far enough to close the hollows, then taken back in to PAD: along rows, then along columns, a pixel
+    // stays only with `back` pixels of the shape on either side of it.
+    const back = CLOSE - PAD;
+    const wide = grown(CLOSE);
+    const kept = new Uint8Array(w * h);
+    const span = new Int32Array(Math.max(w, h));
+    for (let y = 0; y < h; y++) {
+      let n = 0;
+      for (let x = 0; x < w; x++) { n = wide[y * w + x] ? n + 1 : 0; span[x] = n; }
+      n = 0;
+      for (let x = w - 1; x >= 0; x--) { n = wide[y * w + x] ? n + 1 : 0; kept[y * w + x] = n > back && span[x] > back ? 1 : 0; }
+    }
+    const closed = new Uint8Array(w * h);
+    for (let x = 0; x < w; x++) {
+      let n = 0;
+      for (let y = 0; y < h; y++) { n = kept[y * w + x] ? n + 1 : 0; span[y] = n; }
+      n = 0;
+      for (let y = h - 1; y >= 0; y--) { n = kept[y * w + x] ? n + 1 : 0; closed[y * w + x] = n > back && span[y] > back ? 1 : 0; }
+    }
+    // Taking it back in squares off what was round, so the letters with a plain margin are laid over it.
+    const near = grown(PAD - 1);
+    const alpha = new Uint8Array(w * h);
+    for (let i = 0; i < alpha.length; i++) alpha[i] = closed[i] || near[i] ? 255 : 0;
+    return { x0, y0, w, h, alpha };
+  })();
+  inkCache = { key, ink: made };
+  return made;
 }
 
-function layOut(scene: WireScene): Trace[] {
+function layOut(scene: WireScene, ink: Ink | null): Trace[] {
   // Each pin and each bundle draws its chances from its own place on the title, not from one shared run of them:
   // a line that the text gets in the way of then changes alone, and the rest stay as they were while you type.
   const rng = (key: string) => random(`${scene.seed}\n${key}`);
@@ -78,16 +123,15 @@ function layOut(scene: WireScene): Trace[] {
   const cols = Math.floor(scene.width / PITCH);
   const rows = Math.floor(scene.height / PITCH);
   const t = scene.title;
-  // The cells the letters are in, and the block of cells that holds them all: the chip the traces leave. Its pins are
-  // the letters: a line starts against a letter and crosses whatever of the block is empty on its way out.
-  const ink = inkOf(scene);
+  // The cells the words' shape reaches into (`inkOf`), and the block of cells that holds them all: the chip the traces
+  // leave. A line starts at the edge of that shape and crosses whatever of the block is empty on its way out.
   const inked = new Uint8Array(cols * rows);
   let c0 = cols, c1 = -1, r0 = rows, r1 = -1;
   if (ink) {
     for (let r = ink.y0 / PITCH; r < Math.min(rows, (ink.y0 + ink.h) / PITCH); r++) for (let c = ink.x0 / PITCH; c < Math.min(cols, (ink.x0 + ink.w) / PITCH); c++) {
       let n = 0;
       for (let y = 0; y < PITCH; y++) for (let x = 0; x < PITCH; x++) if (ink.alpha[(r * PITCH - ink.y0 + y) * ink.w + c * PITCH - ink.x0 + x] > INK) n++;
-      if (n < 3) continue;
+      if (!n) continue;
       inked[r * cols + c] = 1;
       c0 = Math.min(c0, c); c1 = Math.max(c1, c); r0 = Math.min(r0, r); r1 = Math.max(r1, r);
     }
@@ -95,15 +139,23 @@ function layOut(scene: WireScene): Trace[] {
   const lettered = c1 >= 0;
   if (!lettered) { c0 = Math.floor(t.left / PITCH); c1 = Math.ceil(t.right / PITCH) - 1; r0 = Math.floor(t.top / PITCH); r1 = Math.ceil(t.bottom / PITCH) - 1; }
   const shut = new Uint8Array(cols * rows); // the title and the text
-  const shutCells = (ca: number, cb: number, ra: number, rb: number) => {
-    for (let r = Math.max(0, ra); r <= Math.min(rows - 1, rb); r++) for (let c = Math.max(0, ca); c <= Math.min(cols - 1, cb); c++) shut[r * cols + c] = 1;
+  const shutCells = (ca: number, cb: number, ra: number, rb: number, as: number) => {
+    for (let r = Math.max(0, ra); r <= Math.min(rows - 1, rb); r++) for (let c = Math.max(0, ca); c <= Math.min(cols - 1, cb); c++) shut[r * cols + c] = as;
   };
-  shutCells(c0, c1, r0, r1);
+  shutCells(c0, c1, r0, r1, 2); // 2: the title's block, which only a stub may be laid in, and only where it is empty
   // A cell is the text's when its middle is.
-  for (const b of scene.blocks) shutCells(Math.ceil(b.left / PITCH - 0.5), Math.floor(b.right / PITCH - 0.5), Math.ceil(b.top / PITCH - 0.5), Math.floor(b.bottom / PITCH - 0.5));
+  for (const b of scene.blocks) shutCells(Math.ceil(b.left / PITCH - 0.5), Math.floor(b.right / PITCH - 0.5), Math.ceil(b.top / PITCH - 0.5), Math.floor(b.bottom / PITCH - 0.5), 1);
   const taken = new Uint8Array(cols * rows);
   const slashes = new Map<number, number>(); // diagonal steps, by the square they cross: two may not cross each other
-  const closed = (c: number, r: number) => c < 0 || r < 1 || c >= cols || r >= rows || shut[r * cols + c] === 1; // a row clear of the top edge
+  // How high and how far right the line being laid may go. The long ones keep below the title's top and left of its
+  // right edge: nothing but a short stub leaves the word upwards or to the right.
+  let ceiling = 1; let wall = cols - 1;
+  let stub = false; // the line being laid is a stub, which may cross the empty part of the title's block
+  const closed = (c: number, r: number) => {
+    if (c < 0 || r < 1 || c >= cols || r >= rows || r < ceiling || c > wall) return true; // a row clear of the top edge
+    const i = r * cols + c;
+    return shut[i] === 1 || inked[i] === 1 || (shut[i] === 2 && !(stub && lettered));
+  };
   const free = (c: number, r: number) => !closed(c, r) && !taken[r * cols + c];
   const canStep = (c: number, r: number, dir: number) => {
     const nc = c + DX[dir], nr = r + DY[dir];
@@ -157,7 +209,7 @@ function layOut(scene: WireScene): Trace[] {
   /** Follows a plan from a pin, finding its way round the text and the lines already laid, and leaning into open
    *  ground: where one side of it is open and the other is not, its jogs go that way, and further. It ends when it is boxed
    *  in, or has slid sideways along something for too long without getting on. */
-  const run = (c: number, r: number, plan: Step[], length: number, rand: () => number): Trace | null => {
+  const run = (c: number, r: number, plan: Step[], length: number, rand: () => number, least = 6): Trace | null => {
     if (!free(c, r) || !plan.length) return null;
     const cells: [number, number][] = [[c, r]];
     taken[r * cols + c] = 1;
@@ -181,7 +233,7 @@ function layOut(scene: WireScene): Trace[] {
         cells.push([c, r]);
       }
     }
-    if (cells.length < 6) return null; // too short to read as a line: left out (its cells stay taken, which only keeps others clear of the title)
+    if (cells.length < least) return null; // too short to read as a line: left out (its cells stay taken, which only keeps others clear of the title)
     const kind = rand();
     return { cells, end: kind < 0.45 ? 'via' : kind < 0.65 ? 'pad' : 'fade', pulse: rand() < 0.4 ? 0.12 + rand() * 0.45 : -1 };
   };
@@ -234,7 +286,7 @@ function layOut(scene: WireScene): Trace[] {
   /** Keeps a line that was laid from the pin cell (c, r), with its way in to the letter that lies `dir` of it. */
   const add = (made: Trace | null, way: [number, number][], c: number, r: number, dir: number) => {
     if (!made) return;
-    for (const [wc, wr] of way) inner[wr * cols + wc] = 1;
+    for (const [wc, wr] of way) { inner[wr * cols + wc] = 1; taken[wr * cols + wc] = 1; }
     const [fc, fr] = way[0] ?? [c, r];
     made.cells = [...way, ...made.cells];
     made.from = touch(fc, fr, dir);
@@ -242,7 +294,9 @@ function layOut(scene: WireScene): Trace[] {
   };
   const reach = Math.max(18, Math.floor(Math.min(scene.width * 0.6, 640) / PITCH));
   const room = cols - 1 - c1; // cells to the right of the title
-  // The left side of the first letter (and of a taller one just after it) gives the pins of the left edge. They leave in bundles: the lines of a bundle make the same turns, so they stay side by side, and stop one after another.
+  // The left side of the word gives the pins of the left edge. They leave in bundles: the lines of a bundle make the
+  // same turns, so they stay side by side, and stop one after another. They keep below the title's top.
+  ceiling = r0;
   {
     const rand = rng('left');
     const pick = picker(rand);
@@ -259,46 +313,10 @@ function layOut(scene: WireScene): Trace[] {
       if (rand() < 0.35) r += 1;
     }
   }
-  // The right edge, where there is room beside the text: out, then down the margin.
-  if (room > 4) {
-    for (let r = r0; r <= r1; r++) {
-      const own = rng(`r${r - r0}`);
-      const pick = picker(own);
-      if (own() < 0.3) continue;
-      const out = pick(2, Math.max(3, Math.min(room - 2, 12)));
-      const plan: Step[] = [{ dir: E, len: out + (r1 - r) }, { dir: 1, len: pick(1, 3) }, ...snake(own, S, 70, 0)];
-      const way = lead(c1, r, W, REACH_IN);
-      if (way) add(run(c1 + 1, r, plan, pick(14, 64), own), way, c1 + 1, r, W);
-    }
-  }
-  // The tops of the letters: each line escapes upwards, a row higher than the last so that they can turn and run side by side.
-  {
-    const rand = rng('top');
-    const above = r0;
-    const ways = new Map<number, [number, number][]>();
-    const tops: number[] = [];
-    for (let c = c0 + 1; c <= c1 - 1; c += 2) if (rand() < 0.6) { const way = lead(c, r0, S, rows); if (way) { tops.push(c); ways.set(c, way); } }
-    const westward = tops.filter((c) => c < (c0 + c1) / 2).slice(0, Math.max(0, above - 2));
-    const eastward = tops.filter((c) => c >= (c0 + c1) / 2).reverse().slice(0, Math.max(0, above - 2));
-    const shared = snake(rand, W, reach, 0.12).map((s) => (s.dir === 5 ? { ...s, dir: 3 } : s));
-    westward.forEach((c, i) => {
-      const own = rng(`t${c - c0}`);
-      const plan: Step[] = [{ dir: N, len: i + 1 }, { dir: 5, len: 1 }, { dir: W, len: c - c0 + picker(own)(2, 6) }, ...shared];
-      const way = lead(c, r0, S, rows); // again: a line laid since may lie across it
-      if (way) add(run(c, r0 - 1, plan, Math.floor(reach * (0.45 + own() * 0.5)), own), way, c, r0 - 1, S);
-    });
-    if (room > 6) {
-      const down = snake(rand, S, 60, 0);
-      eastward.forEach((c, i) => {
-        const own = rng(`t${c - c0}`);
-        const plan: Step[] = [{ dir: N, len: i + 1 }, { dir: 7, len: 1 }, { dir: E, len: c1 - c + 2 + i }, { dir: 1, len: 2 }, ...down];
-        const way = lead(c, r0, S, rows);
-        if (way) add(run(c, r0 - 1, plan, picker(own)(24, 70), own), way, c, r0 - 1, S);
-      });
-    }
-  }
-  // The feet of the letters, where the note leaves room under the title (beside its first line, that is past the
-  // ends of the short lines below): down into it, in bundles. A pin with text close under it has none.
+  // The feet of the word, where the note leaves room under the title (beside its first line, that is past the ends
+  // of the short lines below): down into it, in bundles, never out past the title's right edge. A pin with text
+  // close under it has none.
+  wall = c1;
   {
     const rand = rng('bottom');
     const pick = picker(rand);
@@ -316,6 +334,34 @@ function layOut(scene: WireScene): Trace[] {
       c += pick(2, 6);
     }
   }
+  ceiling = 1; wall = cols - 1;
+  // Over the top and off the right-hand end there are only stubs: a few short, shallow lines that finish those
+  // edges off, each from the top or the end of the letter it is at. Up a cell and away to the left; out a cell or
+  // two and down.
+  stub = true;
+  for (let c = c0 + 1; c <= c1 - 1; c += 2) {
+    const own = rng(`t${c - c0}`);
+    const pick = picker(own);
+    if (own() < 0.55) continue;
+    const plan: Step[] = [{ dir: N, len: 1 }, { dir: 5, len: 1 }, ...(own() < 0.5 ? [{ dir: W, len: pick(1, 3) }] : [])];
+    let top = r0;
+    while (top <= r1 && lettered && !inked[top * cols + c]) top++;
+    if (top > r1) continue; // between two words
+    add(run(c, top - 1, plan, 6, own, 3), [], c, top - 1, S);
+  }
+  if (room >= 2) {
+    for (let r = r0; r <= r1; r++) {
+      const own = rng(`r${r - r0}`);
+      const pick = picker(own);
+      if (own() < 0.45) continue;
+      const plan: Step[] = [{ dir: E, len: pick(1, 2) }, { dir: 1, len: pick(1, 2) }, ...(own() < 0.4 ? [{ dir: S, len: pick(1, 2) }] : [])];
+      let end = c1;
+      while (end >= c0 && lettered && !inked[r * cols + end]) end--;
+      if (end < c0 || c1 - end > REACH_IN) continue; // the last letter has nothing at this height
+      add(run(end + 1, r, plan, 6, own, 3), [], end + 1, r, W);
+    }
+  }
+  stub = false;
   return traces;
 }
 
@@ -330,7 +376,8 @@ export function drawWires(canvas: HTMLCanvasElement, scene: WireScene) {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, scene.width, scene.height);
   if (scene.strength <= 0 || scene.width < 80 || scene.height < 30) return '';
-  const traces = layOut(scene);
+  const letters = inkOf(scene);
+  const traces = layOut(scene, letters);
   const at = (cell: [number, number]): [number, number] => [(cell[0] + 0.5) * PITCH, (cell[1] + 0.5) * PITCH];
   const A = scene.strength;
   const path = (points: [number, number][]) => { ctx.beginPath(); points.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); };
@@ -363,7 +410,7 @@ export function drawWires(canvas: HTMLCanvasElement, scene: WireScene) {
     // Where it leaves the title: a pin, a little heavier than the line.
     const [px, py] = points[1];
     const ang = Math.atan2(py - y0, px - x0);
-    ctx.save(); ctx.translate(x0, y0); ctx.rotate(ang); ctx.fillRect(-3.2, -1, 3.4, 2); ctx.restore();
+    ctx.save(); ctx.translate(x0, y0); ctx.rotate(ang); ctx.fillRect(-0.4, -1, 3.4, 2); ctx.restore();
     // Where it stops: a via (a ring with its hole), a pad, or nothing.
     if (trace.end === 'via') {
       ctx.lineWidth = 1.1;
@@ -384,6 +431,18 @@ export function drawWires(canvas: HTMLCanvasElement, scene: WireScene) {
       ctx.strokeStyle = glow; ctx.lineWidth = 1.3;
       path(lit); ctx.stroke();
     }
+  }
+  // Nothing is left inside the words' shape: not the soft edge of a line, nor its bloom.
+  if (letters) {
+    const stamp = document.createElement('canvas');
+    stamp.width = letters.w; stamp.height = letters.h;
+    const image = new ImageData(letters.w, letters.h);
+    for (let i = 0; i < letters.alpha.length; i++) image.data[i * 4 + 3] = letters.alpha[i];
+    stamp.getContext('2d')!.putImageData(image, 0, 0);
+    ctx.save();
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.drawImage(stamp, letters.x0, letters.y0);
+    ctx.restore();
   }
   // Everything fades with its distance from the word: quickly at first, then a long faint tail.
   const cx = (scene.title.left + scene.title.right) / 2;
