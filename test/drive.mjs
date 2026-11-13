@@ -13,7 +13,13 @@ const work = path.join(cfg, 'work');
 fs.mkdirSync(shots, { recursive: true });
 fs.mkdirSync(path.join(work, 'notes'), { recursive: true });
 fs.writeFileSync(path.join(cfg, 'hist'), '');
-if (process.env.SETTINGS) fs.writeFileSync(path.join(cfg, 'settings.json'), process.env.SETTINGS);
+// A scenario's own settings (`export const settings`), then SETTINGS from the environment, go over these. Temporary
+// tabs are off unless a scenario asks for them: most scenarios open several files and expect a tab for each.
+const scenario = process.argv[2] || 'boot';
+const mod = await import(`./scenarios/${scenario}.mjs`);
+fs.writeFileSync(path.join(cfg, 'settings.json'), JSON.stringify({ previewTabs: false, ...mod.settings, ...(process.env.SETTINGS ? JSON.parse(process.env.SETTINGS) : null) }));
+// STATE: a saved session to start from, with $WORK standing for the scenario's work folder.
+if (process.env.STATE) fs.writeFileSync(path.join(cfg, 'state.json'), process.env.STATE.replaceAll('$WORK', work));
 fs.writeFileSync(path.join(work, 'notes', 'plan.md'), '# Plan\n\nA paragraph with **bold** text and a [link](https://example.com).\n\n- first item\n- second item\n\nSee [[Some Note]] and ![[diagram.png]] for more.\n\n- [ ] open task\n- [x] done task\n\n1. one\n2. two\n\n```sh\necho hi\n```\n');
 fs.writeFileSync(path.join(work, 'main.py'), 'import sys\n\n\ndef greet(name):\n    return f"hello {name}, this is a deliberately long line that should wrap when the editor pane is narrow enough to need it"\n\n\nprint(greet(sys.argv[1] if len(sys.argv) > 1 else "world"))\n');
 fs.writeFileSync(path.join(work, 'data.json'), '{\n  "a": 1,\n  "b": [1, 2, 3]\n}\n');
@@ -38,8 +44,6 @@ const ctx = { app, page, shot, type, run, state, work, cfg, logs };
 try {
   await page.waitForSelector('.term-host .xterm', { timeout: 20000 });
   await page.waitForFunction(() => document.querySelector('.cmd-input') && !document.querySelector('.cmd-input').classList.contains('is-hidden'), null, { timeout: 15000 }).catch(() => console.log('!! prompt never appeared'));
-  const scenario = process.argv[2] || 'boot';
-  const mod = await import(`./scenarios/${scenario}.mjs`);
   await mod.default(ctx);
 } catch (e) {
   console.log('!! scenario error:', e.message.split('\n')[0]);

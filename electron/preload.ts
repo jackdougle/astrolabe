@@ -7,12 +7,41 @@ function on(channel: string, fn: (...args: any[]) => void): Unsub {
   return () => ipcRenderer.removeListener(channel, listener);
 }
 
+// A window reloading in place shows a picture of itself, taken just before, until the new page has drawn
+// (the main process keeps it), so the reload is not seen as a blink. The page draws unseen beneath it: the
+// window is see-through, and two layers of it would show as a moment of darker glass.
+let cover: HTMLElement[] = [];
+const shot = ipcRenderer.sendSync('app:shot') as number;
+if (shot) {
+  const put = () => {
+    if (!document.documentElement) return false;
+    const img = document.createElement('img');
+    img.src = `astrolabe://app/__shot/${shot}.png`;
+    img.style.cssText = 'position:fixed;inset:0;width:100vw;height:100vh;z-index:2147483647;pointer-events:none';
+    const hide = document.createElement('style');
+    hide.textContent = '#root{opacity:0!important}';
+    cover = [img, hide];
+    document.documentElement.append(hide, img);
+    return true;
+  };
+  if (!put()) {
+    const seen = new MutationObserver(() => { if (put()) seen.disconnect(); });
+    seen.observe(document, { childList: true });
+  }
+}
+function uncover() {
+  for (const el of cover) el.remove();
+  cover = [];
+}
+
 const api = {
   pty: {
     spawn: (id: string, opts: { cwd?: string; cols: number; rows: number; prompt?: 'own' | 'native' }) => ipcRenderer.invoke('pty:spawn', id, opts),
     write: (id: string, data: string) => ipcRenderer.send('pty:write', id, data),
     resize: (id: string, cols: number, rows: number) => ipcRenderer.send('pty:resize', id, cols, rows),
     kill: (id: string) => ipcRenderer.send('pty:kill', id),
+    /** Takes over a shell that was left running by the page this one replaced. False if it has gone. */
+    attach: (id: string) => ipcRenderer.invoke('pty:attach', id) as Promise<boolean>,
     onData: (fn: (id: string, data: string) => void) => on('pty:data', fn),
     onExit: (fn: (id: string, code: number) => void) => on('pty:exit', fn),
   },
@@ -25,6 +54,7 @@ const api = {
     complete: (cwd: string, token: string) => ipcRenderer.invoke('fs:complete', cwd, token),
     newNote: (dir: string, stamped?: boolean) => ipcRenderer.invoke('fs:newNote', dir, stamped),
     rename: (from: string, name: string) => ipcRenderer.invoke('fs:rename', from, name) as Promise<{ path?: string; error?: string }>,
+    move: (from: string, dir: string) => ipcRenderer.invoke('fs:move', from, dir) as Promise<{ path?: string; error?: string }>,
     trash: (target: string) => ipcRenderer.invoke('fs:trash', target) as Promise<{ ok: boolean; error?: string }>,
     createFile: (dir: string, name: string) => ipcRenderer.invoke('fs:createFile', dir, name) as Promise<{ path?: string; error?: string }>,
     discardBlank: (file: string, text: string) => ipcRenderer.invoke('fs:discardBlank', file, text) as Promise<boolean>,
@@ -36,6 +66,10 @@ const api = {
     confirmUnsaved: (name: string) => ipcRenderer.invoke('dialog:unsaved', name) as Promise<'save' | 'discard' | 'cancel'>,
     pick: (defaultPath?: string) => ipcRenderer.invoke('dialog:pickFiles', defaultPath) as Promise<string[]>,
     pathOf: (file: File) => webUtils.getPathForFile(file),
+    /** Saves pasted or dropped bytes that have no file on disk, and says where. */
+    importImage: (noteDir: string, from: string) => ipcRenderer.invoke('fs:importImage', noteDir, from) as Promise<{ path?: string; error?: string }>,
+    uploadImage: (command: string, file: string) => ipcRenderer.invoke('fs:uploadImage', command, file) as Promise<{ url?: string; error?: string }>,
+    savePasted: (name: string, data: Uint8Array) => ipcRenderer.invoke('fs:savePasted', name, data) as Promise<{ path?: string; error?: string }>,
   },
   shell: {
     commands: () => ipcRenderer.invoke('shell:commands'),
@@ -48,8 +82,22 @@ const api = {
     info: () => ipcRenderer.invoke('app:info'),
     zoom: (factor: number) => ipcRenderer.send('app:zoom', factor),
     unsavedCount: (n: number) => ipcRenderer.send('app:unsavedCount', n),
-    checkUpdate: () => ipcRenderer.invoke('app:checkUpdate') as Promise<'dev' | 'no-source' | 'current' | 'available' | 'busy'>,
-    installUpdate: () => ipcRenderer.invoke('app:installUpdate') as Promise<{ ok: boolean; detail?: string }>,
+    checkUpdate: () => ipcRenderer.invoke('app:checkUpdate') as Promise<'dev' | 'no-source' | 'current' | 'reload' | 'relaunch' | 'busy'>,
+    /** `running` is how many terminals have a command going, which a relaunch would end. */
+    installUpdate: (running: number) => ipcRenderer.invoke('app:installUpdate', running) as Promise<{ ok: boolean; detail?: string }>,
+    /** What the page this one replaced left for it (see src/lib/handoff.ts), or null on an ordinary start. */
+    takeHandoff: () => ipcRenderer.invoke('app:takeHandoff') as Promise<Record<string, unknown> | null>,
+    /** `fn` gathers this page's state when the window is about to reload in place. */
+    onPrepareReload: (fn: () => Promise<unknown>) => {
+      ipcRenderer.on('app:prepareReload', async (_e, token: number) => {
+        let data: unknown = null;
+        try { data = await fn(); } catch {}
+        ipcRenderer.send('app:handoff', token, data);
+      });
+    },
+    /** The page is drawn and has its terminals back. */
+    booted: () => { uncover(); ipcRenderer.send('app:booted'); },
+    bootFailed: () => ipcRenderer.send('app:bootFailed'),
     openExternal: (url: string) => ipcRenderer.send('app:openExternal', url),
     reveal: (file: string) => ipcRenderer.send('app:reveal', file),
     newWindow: () => ipcRenderer.send('app:newWindow'),
@@ -57,6 +105,10 @@ const api = {
     onMenuCommand: (fn: (cmd: string) => void) => on('menu:command', fn),
     onFullscreen: (fn: (on: boolean) => void) => on('win:fullscreen', fn),
     onFocus: (fn: (on: boolean) => void) => on('win:focus', fn),
+    /** Files handed to the app from outside (`open -a Astrolabe note.md`): `onOutsideFiles` says some are waiting
+     *  and `takeOutsideFiles` collects them. */
+    onOutsideFiles: (fn: () => void) => on('app:outsideFiles', fn),
+    takeOutsideFiles: () => ipcRenderer.invoke('app:takeOutsideFiles') as Promise<string[]>,
   },
   settings: {
     load: () => ipcRenderer.invoke('settings:load'),

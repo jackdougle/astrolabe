@@ -27,6 +27,6 @@ export default async function ({ page, run, type, work, shot }) {
   await retitle(''); await page.keyboard.press('Backspace'); await page.keyboard.press('Enter'); await page.waitForTimeout(500);
   console.log('after emptying:', fs.readdirSync(dir), '| title:', (await title())?.text);
 
-  await page.keyboard.press('Meta+r'); await page.waitForTimeout(600);
+  await page.keyboard.press('Meta+Shift+r'); await page.waitForTimeout(600);
   console.log('raw view shows title:', await page.evaluate(() => { const e = document.querySelector('.rich-title'); return !!e && e.offsetParent !== null; }));
 }

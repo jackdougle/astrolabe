@@ -2,7 +2,7 @@
 export default async function ({ page }) {
   const read = () => page.evaluate(() => {
     const cs = getComputedStyle(document.querySelector('.app'));
-    return ['--alpha', '--editor-alpha', '--chrome-alpha'].map((k) => `${k}=${cs.getPropertyValue(k).trim()}`).join(' ');
+    return ['--alpha', '--chrome-alpha'].map((k) => `${k}=${cs.getPropertyValue(k).trim()}`).join(' ');
   });
   await page.evaluate(() => document.body.classList.remove('is-blurred'));
   console.log('focused  ', await read());

@@ -2,8 +2,9 @@
 // the single source of truth: this view reads from it, and writes the whole
 // document back to it after each edit made here.
 import { defaultValueCtx, Editor, editorViewCtx, editorViewOptionsCtx, parserCtx, remarkCtx, remarkStringifyOptionsCtx, rootCtx, serializerCtx } from '@milkdown/kit/core';
-import { commonmark, wrapInBlockquoteInputRule } from '@milkdown/kit/preset/commonmark';
-import { gfm } from '@milkdown/kit/preset/gfm';
+import { commonmark, headingIdGenerator, wrapInBlockquoteInputRule, wrapInHeadingInputRule } from '@milkdown/kit/preset/commonmark';
+import { gfm, remarkGFMPlugin, strikethroughInputRule, wrapInTaskListInputRule } from '@milkdown/kit/preset/gfm';
+import { toggleMark } from '@milkdown/kit/prose/commands';
 import { clipboard } from '@milkdown/kit/plugin/clipboard';
 import { history } from '@milkdown/kit/plugin/history';
 import { listener, listenerCtx } from '@milkdown/kit/plugin/listener';
@@ -13,7 +14,7 @@ import { Plugin, PluginKey, Selection, TextSelection } from '@milkdown/kit/prose
 import type { EditorState, Transaction } from '@milkdown/kit/prose/state';
 import { Decoration, DecorationSet } from '@milkdown/kit/prose/view';
 import type { EditorView } from '@milkdown/kit/prose/view';
-import { Fragment } from '@milkdown/kit/prose/model';
+import { Fragment, Slice } from '@milkdown/kit/prose/model';
 import type { Node as PMNode } from '@milkdown/kit/prose/model';
 import { canJoin } from '@milkdown/kit/prose/transform';
 import { $prose, getMarkdown, insert } from '@milkdown/kit/utils';
@@ -21,10 +22,15 @@ import '@milkdown/kit/prose/view/style/prosemirror.css';
 import type * as monacoNs from 'monaco-editor';
 import { appInfo, dirname } from './api';
 import { openLink } from './links';
+import { closeLinkBox, showLinkBox } from './richLink';
 import { emojiFor } from './monaco';
 import { caret, copyLines, deleteLines, lineBelow, moveLines, pairs, selectLines } from './richEditing';
 import type { Cmd } from './richEditing';
-import { notion, notionRules, toggleBackspace, toggleClick, toggleEnter, toggleMarks, toggleOpen } from './richNotion';
+import { joinNotes, notion, notionRules, taskEnter, toggleBackspace, toggleClick, toggleEnter, toggleMarks, toggleOpen } from './richNotion';
+import { hashBackspace, hashEnter, hashes, hashMark, headingId, headingRule, unhashed } from './richHashes';
+import { imageDrops, imageView } from './richImages';
+import { drawnSelection } from './richSelection';
+import { motion, shift } from './richMotion';
 import { symbolRules } from './richSymbols';
 
 const FRONTMATTER = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/;
@@ -95,14 +101,6 @@ const toggleTask: Cmd = (state, dispatch) => {
   }
   return false;
 };
-/** Backspace in a heading with no text left makes it an ordinary line at once, rather than stepping down a level per press. */
-const clearHeading: Cmd = (state, dispatch) => {
-  const { $from, empty } = state.selection;
-  const paragraph = state.schema.nodes.paragraph;
-  if (!empty || $from.parent.type.name !== 'heading' || $from.parent.content.size > 0 || !paragraph) return false;
-  if (dispatch) dispatch(state.tr.setBlockType($from.before(), $from.after(), paragraph));
-  return true;
-};
 const ITEM = /^([ \t]*)([-*+]|\d{1,9}[.)])([ \t]+|$)/;
 const cols = (ws: string) => { let w = 0; for (const ch of ws) w += ch === '\t' ? 4 - (w % 4) : 1; return w; };
 /** Markdown only nests an item that is indented as far as its parent's text, so two spaces under "1. " leave it
@@ -144,11 +142,27 @@ export function relaxLists(md: string) {
 // The raw view's line keys: move, copy, delete, select, and a new line below.
 const extras = $prose(() => keymap({
   'Alt-ArrowUp': moveLines(-1), 'Alt-ArrowDown': moveLines(1), 'Shift-Alt-ArrowUp': copyLines(-1), 'Shift-Alt-ArrowDown': copyLines(1),
-  'Shift-Mod-k': deleteLines, 'Mod-l': selectLines,
-  Enter: (state, dispatch) => slashFile(state, dispatch) || toggleEnter(state, dispatch),
+  'Shift-Mod-k': deleteLines, 'Ctrl-l': selectLines,
+  // Strike through. Tildes are left alone as typed, so a path or an "about" (~/notes, ~5) is never taken for one.
+  'Shift-Mod-x': (state, dispatch) => { const strike = state.schema.marks.strike_through; return !!strike && toggleMark(strike)(state, dispatch); }, // ⌘L copies the file's path (commands.ts)
+  Enter: (state, dispatch) => slashFile(state, dispatch) || hashEnter(state, dispatch) || toggleEnter(state, dispatch) || taskEnter(state, dispatch),
   'Mod-Enter': (state, dispatch) => toggleOpen(state, dispatch) || toggleTask(state, dispatch) || lineBelow(state, dispatch),
-  Backspace: (state, dispatch) => clearHeading(state, dispatch) || toggleBackspace(state, dispatch),
+  Backspace: (state, dispatch) => hashBackspace(state, dispatch) || toggleBackspace(state, dispatch),
 }));
+// [words](address) typed out becomes the words, linked, as its closing bracket goes in (the raw view keeps the
+// notation, which is what the file holds). A picture's ![alt](address) is not a link, and neither is anything in code.
+const linkRule = $prose(() => inputRules({ rules: [
+  new InputRule(/(?<!!)\[([^[\]\n]+)\]\(([^()\s]+)\)$/, (state, match, start, end) => {
+    const link = state.schema.marks.link;
+    const code = state.schema.marks.inlineCode;
+    const $start = state.doc.resolve(start);
+    if (!link || $start.parent.type.spec.code || (code && state.doc.rangeHasMark(start, end, code))) return null;
+    const before = $start.parent.textBetween(0, $start.parentOffset, undefined, '\ufffc');
+    if ((before.split('`').length - 1) % 2) return null; // code still being typed
+    // The words keep whatever they already were (bold, say), and what is typed next is not part of the link.
+    return state.tr.replaceWith(start, end, state.schema.text(match[1], link.create({ href: match[2] }).addToSet($start.marks()))).removeStoredMark(link);
+  }),
+] }));
 const emojiRule = $prose(() => inputRules({ rules: [
   new InputRule(/(?:^|[\s(>"'])(:([a-z0-9_+-]+):)$/i, (state, match, _start, end) => {
     const emoji = emojiFor(match[2]);
@@ -302,12 +316,31 @@ const clicks = $prose(() => new Plugin({
         void openLink(a.getAttribute('href') ?? '', file ? dirname(file) : appInfo.home);
         return true;
       }
+      // A plain click shows the link's address in a small box, to follow or to change. The caret still lands in the text.
+      if (a && event.button === 0 && !event.shiftKey && !event.altKey && !event.ctrlKey) showLinkBox(view, a, event);
       return false;
     },
   },
 }));
 
-export interface RichHandle { focus(): void; focusEnd(): void; destroy(): void; insertMarkdown(md: string): void; readOnly: boolean }
+// A web address pasted over selected words makes them a link to it, as in the raw view (rawMarkdown.ts). It is
+// used before Milkdown's own clipboard plugin, which would put the address in place of the words.
+const linkPaste = $prose(() => new Plugin({
+  props: {
+    handlePaste(view: EditorView, event: ClipboardEvent) {
+      const url = (event.clipboardData?.getData('text/plain') ?? '').trim();
+      const sel = view.state.selection;
+      const link = view.state.schema.marks.link;
+      if (!link || sel.empty || !(sel instanceof TextSelection) || !sel.$from.sameParent(sel.$to) || sel.$from.parent.type.spec.code || !/^https?:\/\/\S+$/.test(url)) return false;
+      const words = view.state.doc.textBetween(sel.from, sel.to);
+      if (/^\S+:\/\/\S+$/.test(words.trim()) || view.state.doc.rangeHasMark(sel.from, sel.to, link)) return false;
+      view.dispatch(view.state.tr.addMark(sel.from, sel.to, link.create({ href: url })).scrollIntoView());
+      return true;
+    },
+  },
+}));
+
+export interface RichHandle { focus(): void; focusEnd(): void; destroy(): void; insertMarkdown(md: string, at?: { x: number; y: number }): void; readOnly: boolean }
 
 /** The language tag of a block shown as its Markdown source, for text the rendered view has no way to show. */
 const SOURCE = 'astrolabe:source';
@@ -332,7 +365,18 @@ export async function mountRich(root: HTMLElement, model: monacoNs.editor.ITextM
       ctx.set(rootCtx, root);
       ctx.set(defaultValueCtx, '');
       // Write Markdown the common way: dash bullets, dash rules, one space after the marker.
-      ctx.update(remarkStringifyOptionsCtx, (prev) => ({ ...prev, bullet: '-' as const, rule: '-' as const, listItemIndent: 'one' as const }));
+      ctx.update(remarkStringifyOptionsCtx, (prev) => ({
+        ...prev, bullet: '-' as const, rule: '-' as const, listItemIndent: 'one' as const,
+        handlers: {
+          ...prev.handlers,
+          // A lone tilde means nothing in the file (see singleTilde below), so it is written as typed, not as \~.
+          // Two together would strike words through, so those keep their backslashes.
+          text: (node, parent, state, info) => String(prev.handlers!.text!(node, parent, state, info)).replace(/(?<![\\~])\\~(?!~|\\~)/g, '~'),
+        },
+      }));
+      ctx.set(headingIdGenerator.key, headingId);
+      // In a file, only ~~two tildes~~ strike words through; a single ~ is itself.
+      ctx.set(remarkGFMPlugin.options.key, { singleTilde: false });
       ctx.update(editorViewOptionsCtx, (prev) => ({ ...prev, editable: () => !readOnly, attributes: { class: 'rich', spellcheck: 'false' } }));
       ctx.get(listenerCtx).markdownUpdated((_ctx, markdown) => {
         if (applying || readOnly || destroyed) return;
@@ -341,8 +385,9 @@ export async function mountRich(root: HTMLElement, model: monacoNs.editor.ITextM
         save();
       });
     })
-    .use(commonmark.filter((plugin) => plugin !== wrapInBlockquoteInputRule)).use(gfm).use(notion) // > makes a toggle here, so the preset's own rule for it (a quote) is left out
-    .use(history).use(clipboard).use(listener).use(extras).use(pairs).use(notionRules).use(emojiRule).use(symbolRules).use(clicks).use(tickMotion).use(cutLine).use(caret)
+    // > makes a toggle here, so the preset's own rule for it (a quote) is left out; so is its heading rule, for the one in richHashes.ts.
+    .use(commonmark.filter((plugin) => plugin !== wrapInBlockquoteInputRule && plugin !== wrapInHeadingInputRule)).use(gfm.filter((plugin) => plugin !== strikethroughInputRule && plugin !== wrapInTaskListInputRule)).use(notion).use(hashMark).use(headingRule)
+    .use(history).use(linkPaste).use(clipboard).use(listener).use(extras).use(pairs).use(notionRules).use(emojiRule).use(symbolRules).use(linkRule).use(clicks).use(tickMotion).use(cutLine).use(joinNotes).use(hashes).use(imageView).use(imageDrops).use(motion).use(shift).use(drawnSelection).use(caret)
     .create();
 
   // The file and the note are kept in step block by block. Each top-level block of the note is tied to the
@@ -397,7 +442,9 @@ export async function mountRich(root: HTMLElement, model: monacoNs.editor.ITextM
     read.set(src, nodes);
     return nodes;
   };
-  const same = (a: PMNode, b: PMNode | undefined) => a === b || (!!b && a.eq(b));
+  // A heading with the caret in it shows its #s (richHashes.ts) and is otherwise the block it was.
+  const same = (a: PMNode, b: PMNode | undefined) => a === b || (!!b && (a.eq(b) || unhashed(a).eq(unhashed(b))));
+  const still = (a: PMNode, b: PMNode) => a === b || (unhashed(a) !== a && unhashed(a).eq(b));
   const topNodes = () => { const out: PMNode[] = []; view.state.doc.forEach((node) => { out.push(node); }); return out; };
 
   /** Shows the file's text, changing only the blocks that differ from what is shown (so the caret keeps its place). */
@@ -411,9 +458,9 @@ export async function mountRich(root: HTMLElement, model: monacoNs.editor.ITextM
     if (!next.length) next = [schema.nodes.paragraph.create()];
     const now = topNodes();
     let a = 0;
-    while (a < now.length && a < next.length && now[a] === next[a]) a += 1;
+    while (a < now.length && a < next.length && still(now[a], next[a])) a += 1;
     let b = 0;
-    while (b < now.length - a && b < next.length - a && now[now.length - 1 - b] === next[next.length - 1 - b]) b += 1;
+    while (b < now.length - a && b < next.length - a && still(now[now.length - 1 - b], next[next.length - 1 - b])) b += 1;
     if (a === now.length && a === next.length) { adopt(); return; }
     let from = 0;
     for (let i = 0; i < a; i++) from += now[i].nodeSize;
@@ -543,7 +590,20 @@ export async function mountRich(root: HTMLElement, model: monacoNs.editor.ITextM
         });
       } catch {}
     },
-    insertMarkdown(md: string) { if (!readOnly) editor.action(insert(md, true)); },
-    destroy() { destroyed = true; sub.dispose(); editor.destroy(); },
+    /** At the caret, or at the point `at` in the window (where something was dropped). */
+    insertMarkdown(md: string, at?: { x: number; y: number }) {
+      if (readOnly) return;
+      const hit = at ? view.posAtCoords({ left: at.x, top: at.y }) : null;
+      const tr = view.state.tr;
+      if (hit) tr.setSelection(Selection.near(tr.doc.resolve(hit.pos)));
+      // One line's worth goes in as it parses. (By way of HTML, as Milkdown's own insert does, a picture would be
+      // fetched from the wrong place once and come back with its name as a title.)
+      let inline: Fragment | null = null;
+      try { const doc = parse(md); if (doc.childCount === 1 && doc.firstChild!.isTextblock) inline = doc.firstChild!.content; } catch { /* the long way, then */ }
+      if (inline) { view.dispatch(tr.replaceSelection(new Slice(inline, 0, 0)).scrollIntoView()); return; }
+      if (hit) view.dispatch(tr);
+      editor.action(insert(md, true));
+    },
+    destroy() { destroyed = true; closeLinkBox(); sub.dispose(); editor.destroy(); },
   };
 }

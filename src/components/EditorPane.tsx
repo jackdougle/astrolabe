@@ -1,18 +1,25 @@
 import { useEffect, useRef, useState } from 'react';
 import { basename, dirname } from '../lib/api';
-import { closeFileTab, markdownLink, pickAndAttach, renameEntry } from '../lib/commands';
+import { closeFileTab, createEntry, noteLink, pickAndAttach, renameEntry } from '../lib/commands';
+import { graphRoot, isGraph } from '../lib/graph';
+import { carried, carry } from '../lib/handoff';
 import { attachEmoji, contextValue, loadFile, loneColon, monaco, monoFont, overflowNode } from '../lib/monaco';
 import { bus, paneHandles } from '../lib/panes';
+import { pasteLink } from '../lib/rawMarkdown';
+import { drawWires, rgb } from '../lib/titleWires';
 import { mountRich, RichHandle } from '../lib/richMarkdown';
-import { leaves } from '../lib/layout';
-import { EditorPane as EditorPaneState, isMarkdown, scrollSpeed, showing, useStore } from '../lib/store';
+import { EditorPane as EditorPaneState, focusedId, isMarkdown, liveEditors, projectRoot, scrollSpeed, showing, useStore } from '../lib/store';
+import { GraphView } from './GraphView';
 
 const LIST_ITEM = /^(\s*)([-*+]|\d+[.)])(\s+)(\[[ xX]\]\s+)?/;
 
-/** In raw Markdown, * _ ~ typed over a selection go around it instead of replacing it, as ( [ ` already do. */
+// In raw Markdown these typed over a selection go around it instead of replacing it, as ( [ ` already do in the
+// editor: the same set as the rendered view (`WRAPS` in richEditing.ts).
+const WRAP_KEYS: Record<string, string> = { '*': '*', '_': '_', '"': '"', "'": "'", '{': '}', '<': '>', '“': '”', '‘': '’' };
 function handleWrapKey(editor: monaco.editor.IStandaloneCodeEditor, e: monaco.IKeyboardEvent) {
   const key = e.browserEvent.key;
-  if ((key !== '*' && key !== '_' && key !== '~') || e.metaKey || e.ctrlKey || e.browserEvent.isComposing) return;
+  const close = WRAP_KEYS[key];
+  if (!close || e.metaKey || e.ctrlKey || e.browserEvent.isComposing) return;
   const sels = editor.getSelections();
   if (editor.getModel()?.getLanguageId() !== 'markdown' || !sels?.length || sels.some((s) => s.isEmpty())) return;
   e.preventDefault(); e.stopPropagation();
@@ -21,8 +28,34 @@ function handleWrapKey(editor: monaco.editor.IStandaloneCodeEditor, e: monaco.IK
   const start = (ln: number, col: number) => col + at.filter((p) => p.lineNumber === ln && p.column <= col).length;
   const end = (ln: number, col: number) => col + at.filter((p) => p.lineNumber === ln && p.column < col).length;
   editor.pushUndoStop();
-  editor.executeEdits('wrap', at.map((p) => ({ range: monaco.Range.fromPositions(p), text: key, forceMoveMarkers: true })),
+  editor.executeEdits('wrap', at.map((p, i) => ({ range: monaco.Range.fromPositions(p), text: i % 2 ? close : key, forceMoveMarkers: true })),
     sels.map((s) => monaco.Selection.createWithDirection(s.startLineNumber, start(s.startLineNumber, s.startColumn), s.endLineNumber, end(s.endLineNumber, s.endColumn), s.getDirection())));
+  editor.pushUndoStop();
+}
+
+/** ⇧⌘X in raw Markdown: puts ~~ around each selection (the word at the caret when nothing is selected), or takes it away again. */
+function toggleStrike(editor: monaco.editor.IStandaloneCodeEditor) {
+  const model = editor.getModel();
+  if (!model || model.getLanguageId() !== 'markdown') return;
+  const edits: monaco.editor.IIdentifiedSingleEditOperation[] = [];
+  for (const sel of editor.getSelections() ?? []) {
+    let range: monaco.Range = sel;
+    if (sel.isEmpty()) {
+      const word = model.getWordAtPosition(sel.getPosition());
+      if (!word) continue;
+      range = new monaco.Range(sel.startLineNumber, word.startColumn, sel.startLineNumber, word.endColumn);
+    }
+    const text = model.getValueInRange(range);
+    // The tildes may be inside the selection or just outside it.
+    const around = new monaco.Range(range.startLineNumber, Math.max(1, range.startColumn - 2), range.endLineNumber, range.endColumn + 2);
+    const outer = model.getValueInRange(around);
+    if (text.length >= 4 && text.startsWith('~~') && text.endsWith('~~')) edits.push({ range, text: text.slice(2, -2) });
+    else if (outer.length === text.length + 4 && outer.startsWith('~~') && outer.endsWith('~~')) edits.push({ range: around, text });
+    else edits.push({ range, text: `~~${text}~~` });
+  }
+  if (!edits.length) return;
+  editor.pushUndoStop();
+  editor.executeEdits('strike', edits);
   editor.pushUndoStop();
 }
 
@@ -123,12 +156,13 @@ export function EditorPane({ pane, active }: { pane: EditorPaneState; active: bo
   const richHandle = useRef<RichHandle | null>(null);
   const viewStates = useRef(new Map<string, monaco.editor.ICodeEditorViewState | null>());
   const shownPath = useRef<string | null>(null);
+  const keptScroll = useRef(0); // where a rendered note was scrolled to when the window reloaded in place
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(0);
   const [richNote, setRichNote] = useState<string | null>(null);
   const settings = useStore((s) => s.settings);
-  // The editor fills its tab: no terminals beside it, or expanded over them.
-  const alone = useStore((s) => { const t = s.tabs.find((x) => leaves(x.root).includes(pane.id)); return !t || showing(t, s.panes) === 'editor' || (t.maximized && t.activePane === pane.id); });
+  // The editor fills its tab: nothing beside it, or expanded over the rest.
+  const alone = useStore((s) => showing(s) === 'editor' && (s.editors.maximized ? s.editors.active === pane.id : liveEditors(s).length === 1));
   const file = pane.files.find((f) => f.path === pane.active) ?? null;
   const rendered = !!file && file.rendered && isMarkdown(file.path);
   const renderedRef = useRef(rendered);
@@ -137,9 +171,14 @@ export function EditorPane({ pane, active }: { pane: EditorPaneState; active: bo
 
   const isFocusedPane = () => {
     const s = useStore.getState();
-    return !s.palette && s.tabs.find((t) => t.id === s.activeTab)?.activePane === pane.id;
+    return !s.palette && focusedId(s) === pane.id;
   };
+  // The graph of notes, and an editor with no file in it, are not text: the keyboard goes to their own box.
+  const graph = isGraph(pane.active) ? pane.active : null;
+  const other = useRef(false);
+  other.current = !!graph || !pane.active;
   const focusNow = () => {
+    if (other.current) { hostRef.current?.parentElement?.querySelector<HTMLElement>('.graph-find, .editor-empty input')?.focus(); return; }
     if (renderedRef.current && document.activeElement?.classList.contains('rich-title') && richRef.current?.parentElement?.contains(document.activeElement)) return; // the title is being edited
     if (renderedRef.current && richHandle.current) richHandle.current.focus(); else editorRef.current?.focus();
   };
@@ -160,26 +199,53 @@ export function EditorPane({ pane, active }: { pane: EditorPaneState; active: bo
       overviewRulerBorder: false, unicodeHighlight: { ambiguousCharacters: false },
     });
     editorRef.current = editor;
-    editor.onKeyDown((e) => { handleWrapKey(editor, e); handleListKey(editor, e); });
+    editor.onKeyDown((e) => {
+      handleWrapKey(editor, e); handleListKey(editor, e);
+      if (e.metaKey && e.shiftKey && !e.ctrlKey && !e.altKey && e.keyCode === monaco.KeyCode.KeyX) { e.preventDefault(); e.stopPropagation(); toggleStrike(editor); }
+      // ⌃L selects the line, as ⌘L does in VS Code: here ⌘L copies the file's path (commands.ts).
+      if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.keyCode === monaco.KeyCode.KeyL) { e.preventDefault(); e.stopPropagation(); editor.trigger('keyboard', 'expandLineSelection', null); }
+    });
     attachEmoji(editor, () => ['markdown', 'plaintext'].includes(editor.getModel()?.getLanguageId() ?? ''));
+    const onPaste = (e: ClipboardEvent) => { pasteLink(editor, e); };
+    hostRef.current!.addEventListener('paste', onPaste, true);
+    const host = hostRef.current!;
     paneHandles.set(pane.id, { focus: focusNow });
+    // A window reloading in place keeps each file's caret and scroll position.
+    type Kept = { views: [string, monaco.editor.ICodeEditorViewState | null][]; scroll: number };
+    const kept = carried<Kept>(`editor:${pane.id}`);
+    if (kept) { for (const [path, view] of kept.views) viewStates.current.set(path, view); keptScroll.current = kept.scroll; }
+    const uncarry = carry(`editor:${pane.id}`, (): Kept => {
+      if (shownPath.current) viewStates.current.set(shownPath.current, editor.saveViewState());
+      return { views: [...viewStates.current], scroll: renderedRef.current ? richRef.current?.parentElement?.scrollTop ?? 0 : 0 };
+    });
     // Files attached from Finder (or dropped on the pane) become links in notes and plain paths in code.
-    const offAttach = bus.on('editor.attach', (arg: { pane: string; paths: string[] }) => {
+    // A picture is first uploaded or copied beside the note (`noteLink`). Dropped, they go in where they were dropped.
+    const offAttach = bus.on('editor.attach', async (arg: { pane: string; paths: string[]; at?: { x: number; y: number } }) => {
       const model = editor.getModel();
       if (arg.pane !== pane.id || !model) return;
       const isNote = model.getLanguageId() === 'markdown';
       const dir = dirname(model.uri.path);
-      const text = arg.paths.map((p) => (isNote ? markdownLink(dir, p) : p)).join(isNote ? ' ' : '\n');
-      if (renderedRef.current && richHandle.current) richHandle.current.insertMarkdown(text);
-      else editor.executeEdits('attach', [{ range: editor.getSelection()!, text, forceMoveMarkers: true }]);
+      const parts = isNote ? await Promise.all(arg.paths.map((p) => noteLink(dir, p))) : arg.paths;
+      if (editor.getModel() !== model) return; // another file came to the front meanwhile
+      const text = parts.join(isNote ? ' ' : '\n');
+      if (renderedRef.current && richHandle.current) { richHandle.current.insertMarkdown(text, arg.at); return; }
+      const hit = arg.at ? editor.getTargetAtClientPoint(arg.at.x, arg.at.y)?.position : null;
+      const range = hit ? { startLineNumber: hit.lineNumber, startColumn: hit.column, endLineNumber: hit.lineNumber, endColumn: hit.column } : editor.getSelection()!;
+      editor.executeEdits('attach', [{ range, text, forceMoveMarkers: true }]);
     });
-    return () => { offAttach(); paneHandles.delete(pane.id); editor.dispose(); editorRef.current = null; };
+    return () => { offAttach(); uncarry(); host.removeEventListener('paste', onPaste, true); paneHandles.delete(pane.id); editor.dispose(); editorRef.current = null; };
   }, [pane.id]);
 
   // Show the active file, keeping each file's scroll position and cursor.
   useEffect(() => {
     const editor = editorRef.current;
     if (!editor || !pane.active) return;
+    if (isGraph(pane.active)) {
+      if (shownPath.current) viewStates.current.set(shownPath.current, editor.saveViewState());
+      editor.setModel(null); shownPath.current = null; setError(null);
+      if (isFocusedPane()) requestAnimationFrame(focusNow);
+      return;
+    }
     let cancelled = false;
     const path = pane.active;
     loadFile(path).then((res) => {
@@ -234,6 +300,7 @@ export function EditorPane({ pane, active }: { pane: EditorPaneState; active: bo
       const reveal = r?.kind === 'editor' ? r.reveal : null;
       if (reveal?.end && reveal.path === pane.active && endDone.current !== reveal.n) { endDone.current = reveal.n; h.focusEnd(); }
       else if (isFocusedPane()) h.focus();
+      if (keptScroll.current && root.parentElement) { root.parentElement.scrollTop = keptScroll.current; keptScroll.current = 0; }
     });
     return () => { cancelled = true; handle?.destroy(); if (richHandle.current === handle) richHandle.current = null; root.textContent = ''; };
   }, [rendered, loaded, error]);
@@ -251,15 +318,37 @@ export function EditorPane({ pane, active }: { pane: EditorPaneState; active: bo
       <div className="editor-body" tabIndex={-1}
         onWheel={(e) => { const ed = editorRef.current; if (e.target === e.currentTarget && ed && !rendered) ed.setScrollTop(ed.getScrollTop() + e.deltaY * scrollSpeed(settings)); }}
         onMouseDown={(e) => { if (e.target === e.currentTarget && !rendered && !error) { e.preventDefault(); editorRef.current?.focus(); } }}>
-        <div className={`editor-host${file && isMarkdown(file.path) ? ' is-note' : ''}`} ref={hostRef} style={{ display: rendered || error ? 'none' : undefined }} />
+        <div className={`editor-host${file && isMarkdown(file.path) ? ' is-note' : ''}`} ref={hostRef} style={{ display: rendered || error || graph || !file ? 'none' : undefined }} />
         <div className="markdown" style={{ display: rendered && !error ? undefined : 'none' }}
           onMouseDown={(e) => { if (e.target === e.currentTarget) { e.preventDefault(); richHandle.current?.focus(); } }}>
           {file && rendered && <NoteTitle path={file.path} toNote={() => richHandle.current?.focus()} note={richRef} alone={!richNote} />}
           {richNote && <div className="rich-note">{richNote}</div>}
           <div ref={richRef} />
         </div>
+        {graph && <GraphView root={graphRoot(graph)} />}
+        {!file && <EmptyEditor />}
         {error && <div className="editor-error"><p>{error}</p><button onClick={() => closeFileTab(pane.id, pane.active!)}>Close this tab</button></div>}
       </div>
+    </div>
+  );
+}
+
+/** What an editor shows while it holds no file: a box to name a new one. */
+function EmptyEditor() {
+  const root = useStore((s) => projectRoot(s));
+  const [name, setName] = useState('');
+  const make = () => {
+    const n = name.trim();
+    if (!n) return;
+    // A name with no ending is a note.
+    void createEntry(root, /\.[^./]+$/.test(n) ? n : `${n}.md`);
+  };
+  return (
+    <div className="editor-empty">
+      <div className="editor-empty-title">No file open</div>
+      <input value={name} placeholder="Name a new file" spellCheck={false} onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); make(); } }} />
+      <div className="editor-empty-hint">Enter makes it in <b>{basename(root)}</b> (a name with no ending becomes a note). ⌘O opens a file that is already there, ⌘N starts a dated note.</div>
     </div>
   );
 }
@@ -274,6 +363,16 @@ function fontBox(el: Element) {
 }
 const TITLE_GAP = 28; // clear space kept between the note's first line and a title beside it
 
+/** A title keeps to one line: one too long for it is set smaller until it fits (`--fit` scales its size in styles.css), down to
+ *  three tenths of its size; a name longer still is cut short. */
+function fitTitle(head: HTMLElement, title: HTMLElement) {
+  const now = parseFloat(title.style.getPropertyValue('--fit')) || 1;
+  const natural = title.scrollWidth / now; // its width at full size: text grows in step with its size
+  const fit = Math.max(0.3, Math.min(1, (head.clientWidth - 2) / natural));
+  if (fit === now || (fit < 1 && Math.abs(fit - now) < 0.01)) return; // steady: rounding must not set it shifting back and forth
+  if (fit === 1) title.style.removeProperty('--fit'); else title.style.setProperty('--fit', fit.toFixed(3));
+}
+
 /** Where the title sits beside the note's first line (how far to lower it so the baselines meet), or null when that line leaves no room. */
 function titleBeside(root: HTMLElement | null, head: HTMLElement, title: HTMLElement): number | null {
   const block = root?.querySelector('.rich')?.firstElementChild;
@@ -281,11 +380,13 @@ function titleBeside(root: HTMLElement | null, head: HTMLElement, title: HTMLEle
   const top = block.getBoundingClientRect().top;
   const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
   let text = walker.nextNode();
-  while (text && !text.nodeValue) text = walker.nextNode();
+  const range = document.createRange();
+  // Text that takes no room is passed over: a heading's #s are there but folded away while the note does not have the keyboard.
+  const shown = (node: Node) => { if (!node.nodeValue) return false; range.selectNodeContents(node); return range.getBoundingClientRect().height > 1; };
+  while (text && !shown(text)) text = walker.nextNode();
   let right = 0;
   let baseline: number;
   if (text) {
-    const range = document.createRange();
     range.setStart(text, 0); range.setEnd(text, 1);
     const first = range.getBoundingClientRect();
     baseline = first.bottom - fontBox(text.parentElement!).desc;
@@ -314,12 +415,83 @@ function titleBeside(root: HTMLElement | null, head: HTMLElement, title: HTMLEle
   return Math.round(baseline - top - ((title.offsetHeight - f.asc - f.desc) / 2 + f.asc) * scale);
 }
 
+/** The title's letters for the traces, which leave from the letters themselves: what to draw, in which font, where
+ *  (the start of the text and its baseline, before its slant) and under which transform, all in the page's own
+ *  coordinates. `t` is the title's box on screen, slant included. */
+function titleGlyphs(title: HTMLElement, t: DOMRect, x0: number, y0: number) {
+  const text = title.textContent ?? '';
+  if (!text.trim()) return undefined;
+  const cs = getComputedStyle(title);
+  const font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+  // Until the title's own face has loaded it is drawn in a stand-in. (Only the first family is asked about: the
+  // whole list is never "ready" while a fallback further down it has not been needed yet.)
+  if (!document.fonts.check(`${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily.split(',')[0]}`)) return undefined;
+  const f = fontBox(title); // also sets the measuring font
+  const w = title.offsetWidth, h = title.offsetHeight;
+  const m = new DOMMatrix(cs.transform === 'none' ? undefined : cs.transform);
+  const [ox, oy] = cs.transformOrigin.split(' ').map((v) => parseFloat(v) || 0);
+  // The box before its slant, from the slanted one: where its corners go under the transform.
+  const xs = [[0, 0], [w, 0], [0, h], [w, h]].map(([x, y]) => m.a * (x - ox) + m.c * (y - oy) + m.e + ox);
+  const ys = [[0, 0], [w, 0], [0, h], [w, h]].map(([x, y]) => m.b * (x - ox) + m.d * (y - oy) + m.f + oy);
+  const left = t.left - Math.min(...xs) - x0, top = t.top - Math.min(...ys) - y0;
+  const about = new DOMMatrix().translate(left + ox, top + oy).multiply(m).translate(-(left + ox), -(top + oy));
+  const round = (n: number) => Math.round(n * 1000) / 1000;
+  return {
+    text, font,
+    x: round(left + w - measureCtx.measureText(text).width), // the text ends at the box's right edge
+    baseline: round(top + (h - f.asc - f.desc) / 2 + f.asc),
+    matrix: [about.a, about.b, about.c, about.d, about.e, about.f].map(round),
+  };
+}
+
+/** What the title's traces keep out of, down to `bottom`: each line of the note's text, from the column's left edge
+ *  (`left`) to a little past where the line ends, and every block that is not text as a whole. In the page's own
+ *  coordinates: `x0`, `y0` is where the page's corner is on screen. */
+function noteBoxes(scroller: HTMLElement, x0: number, y0: number, left: number, bottom: number) {
+  const half = (n: number) => Math.round(n * 2) / 2;
+  const out: { left: number; top: number; right: number; bottom: number }[] = [];
+  const add = (r: DOMRect) => { out.push({ left: half(left), top: half(r.top - y0 - 6), right: half(r.right - x0 + 14), bottom: half(r.bottom - y0 + 6) }); };
+  const banner = scroller.querySelector('.rich-note');
+  if (banner) add(banner.getBoundingClientRect());
+  const range = document.createRange();
+  for (const block of scroller.querySelector('.rich')?.children ?? []) {
+    const b = block.getBoundingClientRect();
+    if (b.top - y0 > bottom) break;
+    if (b.height < 1) continue;
+    if (!/^(P|H[1-6]|UL|OL|BLOCKQUOTE)$/.test(block.tagName)) { add(b); continue; }
+    for (const el of block.querySelectorAll('img, pre, table, hr, .toggle')) add(el.getBoundingClientRect());
+    const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+    scan: for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (!node.nodeValue) continue;
+      range.selectNodeContents(node);
+      for (const r of range.getClientRects()) {
+        if (r.top - y0 > bottom) break scan;
+        if (r.height > 1 && r.width > 0) add(r);
+      }
+    }
+  }
+  return out;
+}
+
 /** The note's file name with its rendered text, without the extension: right-aligned beside the first line when that line is short enough, above the note otherwise. Editing it renames the file. */
 function NoteTitle({ path, toNote, note, alone }: { path: string; toNote: () => void; note: React.RefObject<HTMLDivElement | null>; alone: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   const headRef = useRef<HTMLDivElement>(null);
   const busy = useRef(false);
   const [drop, setDrop] = useState<number | null>(null);
+  useEffect(() => {
+    const head = headRef.current, title = ref.current;
+    if (!head || !title) return;
+    let frame = 0;
+    const fit = () => { frame = 0; fitTitle(head, title); };
+    const later = () => { if (!frame) frame = requestAnimationFrame(fit); };
+    const sizes = new ResizeObserver(later); // the title's own size changes as it is typed in
+    sizes.observe(head); sizes.observe(title);
+    document.fonts.addEventListener('loadingdone', later);
+    title.addEventListener('input', later); // once it fills the row its box no longer changes size as more is typed
+    fit();
+    return () => { cancelAnimationFrame(frame); sizes.disconnect(); document.fonts.removeEventListener('loadingdone', later); title.removeEventListener('input', later); };
+  }, [path]);
   useEffect(() => {
     const head = headRef.current, title = ref.current, root = note.current;
     if (!head || !title || !root) return;
@@ -330,11 +502,65 @@ function NoteTitle({ path, toNote, note, alone }: { path: string; toNote: () => 
     const sizes = new ResizeObserver(later);
     sizes.observe(head); sizes.observe(title); sizes.observe(root);
     const edits = new MutationObserver(later);
-    edits.observe(root, { subtree: true, childList: true, characterData: true });
+    edits.observe(root, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['class'] }); // a class can widen the first line: its heading shows its #s while the caret is in it
     document.fonts.addEventListener('loadingdone', later);
+    root.addEventListener('transitionend', later); // text that slides in (a heading's #s) has its full width only now
+    root.addEventListener('animationend', later);
     measure();
-    return () => { cancelAnimationFrame(frame); sizes.disconnect(); edits.disconnect(); document.fonts.removeEventListener('loadingdone', later); };
+    return () => { cancelAnimationFrame(frame); sizes.disconnect(); edits.disconnect(); document.fonts.removeEventListener('loadingdone', later); root.removeEventListener('transitionend', later); root.removeEventListener('animationend', later); };
   }, [alone, path]);
+  // The title has traces running out from it into whatever the note leaves open around it (titleWires.ts), wherever
+  // it sits: on a row of its own or beside the first line. They are laid out again as the text changes shape.
+  const wires = useRef<HTMLCanvasElement>(null);
+  const theme = useStore((s) => s.settings.theme);
+  useEffect(() => {
+    const head = headRef.current, title = ref.current, canvas = wires.current, root = note.current;
+    const scroller = head?.closest('.markdown') as HTMLElement | null;
+    if (!head || !title || !canvas || !scroller) return;
+    let frame = 0;
+    let last = '';
+    const draw = () => {
+      frame = 0;
+      const h = head.getBoundingClientRect(), s = scroller.getBoundingClientRect(), t = title.getBoundingClientRect();
+      if (!h.width || !t.width) return; // not on show
+      const top = s.top - scroller.scrollTop; // where the note's page begins
+      const width = scroller.clientWidth;
+      const height = Math.round(Math.max(h.bottom, t.bottom) - top + 240);
+      const css = getComputedStyle(head);
+      const half = (n: number) => Math.round(n * 2) / 2;
+      const scene = {
+        width, height, seed: path,
+        // To the half pixel, so that the same layout always gives the same drawing.
+        title: { left: half(t.left - s.left - 2), top: half(t.top - top + t.height * 0.14), right: half(t.right - s.left + 2), bottom: half(t.bottom - top - t.height * 0.1) },
+        glyphs: titleGlyphs(title, t, s.left, top),
+        blocks: noteBoxes(scroller, s.left, top, h.left - s.left - 14, height),
+        near: rgb(css.getPropertyValue('--accent')), mid: rgb(css.getPropertyValue('--neon')), far: rgb(css.getPropertyValue('--faint')),
+        strength: 0.24,
+      };
+      const key = JSON.stringify(scene);
+      if (key === last) return;
+      last = key;
+      canvas.style.left = `${s.left - h.left}px`; canvas.style.top = `${top - h.top}px`;
+      canvas.style.width = `${width}px`; canvas.style.height = `${height}px`;
+      canvas.dataset.layout = drawWires(canvas, scene); // for tests: which traces were drawn
+    };
+    const later = () => { if (!frame) frame = requestAnimationFrame(draw); };
+    const sizes = new ResizeObserver(later);
+    sizes.observe(head); sizes.observe(title); sizes.observe(scroller);
+    const edits = new MutationObserver(later);
+    if (root) {
+      sizes.observe(root);
+      edits.observe(root, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['class'] });
+      root.addEventListener('transitionend', later); // text that slides in (a heading's #s) has its full width only now
+      root.addEventListener('animationend', later);
+    }
+    document.fonts.addEventListener('loadingdone', later);
+    draw();
+    return () => {
+      cancelAnimationFrame(frame); sizes.disconnect(); edits.disconnect(); document.fonts.removeEventListener('loadingdone', later);
+      root?.removeEventListener('transitionend', later); root?.removeEventListener('animationend', later);
+    };
+  }, [drop, path, theme]);
   const name = basename(path);
   const dot = name.lastIndexOf('.');
   const stem = dot > 0 ? name.slice(0, dot) : name;
@@ -353,6 +579,7 @@ function NoteTitle({ path, toNote, note, alone }: { path: string; toNote: () => 
   };
   return (
     <div ref={headRef} className={`rich-head${drop === null ? '' : ' is-beside'}`}>
+      <canvas ref={wires} className="title-wires" aria-hidden="true" />
       <div ref={ref} className="rich-title" contentEditable="plaintext-only" suppressContentEditableWarning spellCheck={false} role="textbox" aria-label="Note title"
         style={drop === null ? undefined : { top: drop }}
         onBlur={() => { void commit(); }}

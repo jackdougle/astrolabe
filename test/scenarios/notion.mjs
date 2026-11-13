@@ -1,4 +1,4 @@
-// Notion habits in the rendered view: [] makes a to-do, > a toggle (kept in the file as <details>), " a quote.
+// Notion habits in the rendered view: [] and a space makes a to-do, > a toggle (kept in the file as <details>), " a quote.
 // Also: ⌃⌘S switches displays, and a note sits in the middle when the editor fills the tab.
 import fs from 'node:fs';
 export default async function ({ page, run, type, work, shot }) {
@@ -16,10 +16,10 @@ export default async function ({ page, run, type, work, shot }) {
   await shot('notion-1-open');
 
   // [] on a line of its own, then on a bullet.
-  await endOf('.rich > p:first-child'); await key('Enter'); await type('[]'); await page.waitForTimeout(250);
+  await endOf('.rich > p:first-child'); await key('Enter'); await type('[] '); await page.waitForTimeout(250);
   console.log('[] on a new line:', await blocks(), '| tasks:', await page.evaluate(() => [...document.querySelectorAll('.rich li[data-item-type="task"]')].length));
   await type('todo one'); await key('Enter'); await type('two'); await page.waitForTimeout(400);
-  await page.click('.rich li:has-text("bullet one")'); await page.waitForTimeout(250); await key('Meta+ArrowLeft'); await type('[]'); await page.waitForTimeout(400);
+  await page.click('.rich li:has-text("bullet one")'); await page.waitForTimeout(250); await key('Meta+ArrowLeft'); await type('[] '); await page.waitForTimeout(400);
   console.log('after to-dos:', JSON.stringify((await text()).split('\n').slice(0, 8)));
   await key('Meta+ArrowRight'); await key('Enter'); await type('[['); await type('Wiki'); await page.waitForTimeout(300);
   console.log('[[ still a link:', JSON.stringify((await text()).split('\n').filter((l) => l.includes('Wiki'))));
@@ -58,7 +58,7 @@ export default async function ({ page, run, type, work, shot }) {
   // What was written reads back the same.
   await page.keyboard.press('Meta+s'); await page.waitForTimeout(500);
   const before = await blocks();
-  await key('Meta+r', 900); await key('Meta+r', 1200);
+  await key('Meta+Shift+r', 900); await key('Meta+Shift+r', 1200);
   console.log('raw and back:', before, '->', await blocks(), '| file as saved equals buffer:', fs.readFileSync(file, 'utf8') === (await text()));
 
   // Switch displays, and the middle column.
@@ -76,8 +76,8 @@ export default async function ({ page, run, type, work, shot }) {
   console.log('beside, rendered:', await column());
   await key('Control+Meta+f', 800); console.log('full, rendered:', await column());
   await shot('notion-3-centred');
-  await key('Meta+r', 1000); console.log('full, raw:', await column());
+  await key('Meta+Shift+r', 1000); console.log('full, raw:', await column());
   await shot('notion-4-centred-raw');
-  await key('Meta+r', 1000);
+  await key('Meta+Shift+r', 1000);
   await key('Control+Meta+f', 800); console.log('beside again:', await column());
 }

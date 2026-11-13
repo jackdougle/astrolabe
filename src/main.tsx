@@ -10,9 +10,11 @@ import '@fontsource/cutive-mono/400.css';
 import '@fontsource-variable/instrument-sans';
 import '@fontsource-variable/literata/opsz.css';
 import '@fontsource-variable/literata/opsz-italic.css';
+import '@fontsource/ibm-plex-mono/500-italic.css'; // the note title
 import '@xterm/xterm/css/xterm.css';
 import './styles.css';
-import { loadAppInfo } from './lib/api';
+import { api, loadAppInfo } from './lib/api';
+import { carried, loadHandoff, markLive, resumed } from './lib/handoff';
 import { applyHeadingFont, applyNotesFont, loadGoogleFont } from './lib/fonts';
 import { useStore } from './lib/store';
 
@@ -25,7 +27,7 @@ Object.defineProperty(CanvasRenderingContext2D.prototype, 'font', {
 });
 
 async function boot() {
-  await loadAppInfo();
+  await Promise.all([loadAppInfo(), loadHandoff()]);
   // The terminal measures its cell size from the font, so the font has to be ready first.
   await Promise.all([
     document.fonts.load('400 13px "Commit Mono"'),
@@ -45,5 +47,23 @@ async function boot() {
   if (fontFamily) loadGoogleFont(fontFamily).then(() => import('./lib/termSession').then((m) => m.allSessions().forEach((s) => s.applyAppearance())));
   const { App } = await import('./components/App');
   createRoot(document.getElementById('root')!).render(<App />);
+  // Tell the main process once the first screen is really there. After a reload in place it has been showing
+  // a picture of the old page, which goes now; the wait is capped so a slow file never leaves the picture up.
+  const frame = () => new Promise((r) => requestAnimationFrame(r));
+  const settled = (async () => {
+    await frame();
+    const [{ allSessions }, { filesLoaded }] = await Promise.all([import('./lib/termSession'), import('./lib/monaco')]);
+    await Promise.all([...allSessions().map((s) => s.ready), filesLoaded()]);
+    await frame(); await frame();
+  })();
+  await Promise.race([settled, new Promise((r) => setTimeout(r, 2500))]).catch(() => {});
+  markLive();
+  api.app.booted?.();
+  import('./lib/outside').then((m) => m.watchOutsideFiles());
+  // Glyphs drawn while the page was hidden under that picture come out a shade heavier; draw them again now it is not.
+  if (resumed()) import('./lib/termSession').then((m) => m.allSessions().forEach((t) => t.term.clearTextureAtlas()));
+  const note = carried<string>('note');
+  if (note) useStore.getState().showToast(note);
 }
-boot();
+// A build that cannot start says so, and a window that was reloading goes back to the build before it.
+boot().catch((err) => { api.app.bootFailed?.(); throw err; });

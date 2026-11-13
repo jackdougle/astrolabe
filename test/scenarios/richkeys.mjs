@@ -88,7 +88,7 @@ export default async function ({ app, page, type, run, work, shot }) {
     console.log('quote moves as a line:', JSON.stringify(await lines(/^\d|quoted/)));
     await undo();
 
-    // ⇧⌥↓ copies the line, ⇧⌘K deletes it, ⌘L selects it, ⌘↩ opens a line below.
+    // ⇧⌥↓ copies the line, ⇧⌘K deletes it, ⌃L selects it, ⌘↩ opens a line below.
     await click('third item');
     await press('Shift+Alt+ArrowDown');
     await type('X');
@@ -104,10 +104,10 @@ export default async function ({ app, page, type, run, work, shot }) {
     console.log('quote deleted:', !(await text()).includes('quoted'));
     await undo();
     await click('Intro paragraph');
-    await press('Meta+l');
-    console.log('⌘L selects:', JSON.stringify(await page.evaluate(() => getSelection().toString())));
-    await press('Meta+l');
-    console.log('⌘L again takes the next line:', JSON.stringify(await page.evaluate(() => getSelection().toString())));
+    await press('Control+l');
+    console.log('⌃L selects:', JSON.stringify(await page.evaluate(() => getSelection().toString())));
+    await press('Control+l');
+    console.log('⌃L again takes the next line:', JSON.stringify(await page.evaluate(() => getSelection().toString())));
     await press('Alt+ArrowDown');
     console.log('both selected lines move together:', JSON.stringify(await lines(/item|Intro/)));
     await undo();
@@ -127,6 +127,7 @@ export default async function ({ app, page, type, run, work, shot }) {
     // Typing a bracket or a Markdown mark over a selection goes around it.
     const word = async (key, n = 1) => { await click('Intro', 2); for (let i = 0; i < n; i++) { await type(key); await page.waitForTimeout(150); } await page.waitForTimeout(350); const l = (await lines(/paragraph here/))[0]; await undo(n); return l; };
     console.log('( :', await word('('), '| [[ :', await word('[', 2), '| ` :', await word('`'));
+    console.log('" :', await word('"'), "| ' :", await word("'"), '| { :', await word('{'), '| < :', await word('<'), '| "" :', await word('"', 2));
     console.log('* :', await word('*'), '| ** :', await word('*', 2), '| *** :', await word('*', 3), '| _ :', await word('_'), '| ~ :', await word('~'));
     console.log('undone:', (await text()) === base);
     await click('echo two', 2);

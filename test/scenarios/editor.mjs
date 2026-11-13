@@ -17,7 +17,7 @@ export default async function ({ page, shot, run, type, state, work }) {
   // quick open
   await page.keyboard.press('Meta+p');
   await page.waitForTimeout(500);
-  await type('main');
+  await type('main.py');
   await shot('21-quickopen');
   await page.keyboard.press('Enter');
   await page.waitForTimeout(1500);

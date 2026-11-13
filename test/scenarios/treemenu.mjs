@@ -7,7 +7,7 @@ export default async function ({ page, shot, run, type, work }) {
   await page.keyboard.press('Meta+b'); await page.waitForTimeout(500);
   await page.click('.treerow:has-text("notes")'); await page.waitForTimeout(300);
   await page.click('.treerow:has-text("plan.md")'); await page.waitForTimeout(1200);
-  await page.keyboard.press('Meta+r'); await page.waitForTimeout(500);
+  await page.keyboard.press('Meta+Shift+r'); await page.waitForTimeout(500);
   await type('UNSAVED EDIT ');
   console.log('before:', JSON.stringify(await tree()), JSON.stringify(await tabs()));
   // rename the open, unsaved file

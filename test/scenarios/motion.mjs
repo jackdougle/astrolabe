@@ -32,9 +32,9 @@ export default async function ({ app, page, shot, run, type, work }) {
   await at(500); await look('navigator close settled');
 
   const open = async (name) => { await page.keyboard.press('Meta+p'); await at(350); await type(name); await page.keyboard.press('Enter'); };
-  await open('main'); await at(80); await look('editor open +80ms'); await shot('m6-editor-mid');
+  await open('main.py'); await at(80); await look('editor open +80ms'); await shot('m6-editor-mid');
   await at(900);
-  await open('data'); await at(60); await look('second file +60ms');
+  await open('data.json'); await at(60); await look('second file +60ms');
   await at(800);
   await page.keyboard.press('Meta+w'); await at(50); await look('close file +50ms');
   await at(400); await look('close file settled');

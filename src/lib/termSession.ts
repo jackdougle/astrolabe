@@ -3,7 +3,9 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { SearchAddon } from '@xterm/addon-search';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
+import { SerializeAddon } from '@xterm/addon-serialize';
 import { api, formatDuration, tildify } from './api';
+import { carried, carry } from './handoff';
 import { monoFont, pushHistory, refreshFiles } from './monaco';
 import { bus } from './panes';
 import { scrollSpeed, useStore } from './store';
@@ -24,6 +26,19 @@ export interface Block {
 }
 
 type Listener = (ev: 'prompt' | 'running' | 'blocks') => void;
+
+/** A terminal as its page leaves it when the window reloads in place: enough for the next page to draw the
+ *  same screen and carry on with the same shell. Rows are counted from the top of the scrollback. */
+interface TermSnap {
+  cols: number; rows: number;
+  /** The scrollback and screen, then (apart, so block rows can be marked in between) the alternate screen and modes. */
+  normal: string; rest: string;
+  viewportY: number; atBottom: boolean;
+  state: TermSession['state']; native: boolean; booted: boolean; promptSeen: boolean; awaitingPrompt: boolean; submitted: boolean; agentBusy: boolean;
+  early: string; earlyEnter: boolean; input: string;
+  pendingHead: number | null; pendingPartial: boolean; blockSeq: number;
+  blocks: (Pick<Block, 'id' | 'headPartial' | 'native' | 'endInclusive' | 'command' | 'cwd' | 'branch' | 'start' | 'duration' | 'exit'> & { head: number; out: number; end: number | null; running: boolean })[];
+}
 
 const sessions = new Map<string, TermSession>();
 let wired = false;
@@ -52,6 +67,14 @@ export class TermSession {
   readonly host: HTMLDivElement;
   private fit = new FitAddon();
   private search = new SearchAddon();
+  private serializer = new SerializeAddon();
+  /** Settles once the terminal is ready to show: at once, or when a reloaded window's screen is back in place. */
+  ready: Promise<void> = Promise.resolve();
+  /** Set by the pane: what is typed in the command input. */
+  inputText: (() => string) | null = null;
+  /** Text the command input held when the window reloaded, for the pane to put back. */
+  resumedInput = '';
+  private uncarry: () => void = () => {};
   private layer: HTMLDivElement;
   private opened = false;
   private spawned = false;
@@ -91,11 +114,13 @@ export class TermSession {
   constructor(readonly id: string, private startCwd: string) {
     wire();
     const st = useStore.getState();
+    const snap = carried<TermSnap>(`term:${id}`);
     this.host = document.createElement('div');
     this.host.className = 'term-host';
     this.layer = document.createElement('div');
     this.layer.className = 'blk-layer';
     this.term = new Terminal({
+      ...(snap ? { cols: snap.cols, rows: snap.rows } : {}),
       allowProposedApi: true,
       fontFamily: monoFont(), fontSize: st.settings.fontSize, lineHeight: 1.32,
       // Output keeps the weights its program asks for: regular, and bold where marked.
@@ -114,6 +139,7 @@ export class TermSession {
     });
     this.term.loadAddon(this.fit);
     this.term.loadAddon(this.search);
+    this.term.loadAddon(this.serializer);
     const unicode = new Unicode11Addon();
     this.term.loadAddon(unicode);
     this.term.unicode.activeVersion = '11';
@@ -138,6 +164,71 @@ export class TermSession {
       this.settle = window.setTimeout(() => this.refit(), 140);
     });
     sessions.set(id, this);
+    this.uncarry = carry(`term:${id}`, () => this.snapshot());
+    if (snap) this.ready = this.resume(snap);
+  }
+
+  // ---------- carrying on through a window reload ----------
+
+  private async snapshot(): Promise<TermSnap | null> {
+    if (!this.spawned || this.disposed) return null;
+    // Output already on its way in is part of the picture.
+    await new Promise<void>((done) => this.term.write('', done));
+    const normal = this.serializer.serialize({ excludeAltBuffer: true, excludeModes: true });
+    let full = this.serializer.serialize();
+    // Two things the terminal is in the middle of that the serializer leaves out.
+    const core = (this.term as any)._core;
+    try { if (core.coreService.isCursorHidden) full += '\x1b[?25l'; } catch {}
+    try { const enc = core.coreMouseService.activeEncoding; if (enc === 'SGR') full += '\x1b[?1006h'; else if (enc === 'SGR_PIXELS') full += '\x1b[?1016h'; } catch {}
+    const apart = full.startsWith(normal);
+    const row = (m: IMarker | null) => (m && !m.isDisposed && m.line >= 0 ? m.line : null);
+    const buf = this.term.buffer.active;
+    return {
+      cols: this.term.cols, rows: this.term.rows,
+      normal: apart ? normal : full, rest: apart ? full.slice(normal.length) : '',
+      viewportY: buf.viewportY, atBottom: buf.viewportY >= buf.baseY,
+      state: this.state, native: this.native, booted: this.booted, promptSeen: this.promptSeen, awaitingPrompt: this.awaitingPrompt, submitted: this.submitted, agentBusy: this.agentBusy,
+      early: this.early, earlyEnter: this.earlyEnter, input: this.inputText?.() ?? '',
+      pendingHead: row(this.pendingHead), pendingPartial: this.pendingPartial, blockSeq: this.blockSeq,
+      blocks: this.blocks.flatMap((b) => {
+        const head = row(b.head); const out = row(b.out);
+        if (head === null || out === null) return [];
+        return [{ id: b.id, head, out, end: row(b.end), running: !b.end, headPartial: b.headPartial, native: b.native, endInclusive: b.endInclusive, command: b.command, cwd: b.cwd, branch: b.branch, start: b.start, duration: b.duration, exit: b.exit }];
+      }),
+    };
+  }
+
+  /** Draws the screen the last page left and takes its shell back, which never stopped. */
+  private resume(snap: TermSnap) {
+    this.spawned = true;
+    this.native = snap.native; this.state = snap.state; this.booted = snap.booted; this.promptSeen = snap.promptSeen;
+    this.awaitingPrompt = snap.awaitingPrompt; this.submitted = snap.submitted; this.agentBusy = snap.agentBusy;
+    this.early = snap.early; this.earlyEnter = snap.earlyEnter; this.resumedInput = snap.input;
+    this.pendingPartial = snap.pendingPartial; this.blockSeq = snap.blockSeq;
+    return new Promise<void>((done) => {
+      this.term.write(snap.normal, () => {
+        // The rows are where they were, so the blocks can be pinned to them again.
+        const buf = this.term.buffer.normal;
+        const at = (line: number) => this.term.registerMarker(line - (buf.baseY + buf.cursorY));
+        if (snap.pendingHead !== null) this.pendingHead = at(snap.pendingHead);
+        for (const b of snap.blocks) {
+          const { head, out, end, running, ...rest } = b;
+          const block: Block = { ...rest, head: at(head), out: at(out), end: running || end === null ? null : at(end), el: null };
+          if (running) { block.end = null; this.current = block; } else if (!block.end) continue;
+          this.blocks.push(block);
+        }
+      });
+      if (snap.rest) this.term.write(snap.rest);
+      this.term.write('', () => {
+        if (this.disposed) { done(); return; }
+        if (!snap.atBottom) this.term.scrollToLine(snap.viewportY);
+        if (this.current) this.tick = window.setInterval(() => this.schedule(), 1000);
+        this.emit('blocks');
+        this.schedule();
+        // From here the shell's output flows again, starting with what it printed while there was no page.
+        api.pty.attach(this.id).then((alive) => { if (!alive) this.handleExit(); }, () => {}).finally(done);
+      });
+    });
   }
 
   on(fn: Listener) { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; }
@@ -725,6 +816,7 @@ export class TermSession {
     window.clearTimeout(this.settle);
     cancelAnimationFrame(this.raf);
     this.ro.disconnect();
+    this.uncarry();
     sessions.delete(this.id);
     api.pty.kill(this.id);
     this.term.dispose();

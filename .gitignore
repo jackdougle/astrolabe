@@ -3,3 +3,6 @@ dist/
 dist-electron/
 release/
 test/shots/
+dist.next/
+dist.old/
+dist-electron.next/

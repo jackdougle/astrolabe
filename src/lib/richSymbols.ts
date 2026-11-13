@@ -34,6 +34,8 @@ export const symbolRules = $prose(() => inputRules({ rules: [
     const $start = state.doc.resolve(start);
     const upto = $start.parent.textBetween(0, $start.parentOffset, undefined, '￼') + match[0];
     if ((upto.split('`').length - 1) % 2 || upto.lastIndexOf('<!--') > upto.lastIndexOf('-->')) return null;
+    // Nor in an address: a link's target as it is typed, or a bare one.
+    if (/(?:\]\(|\bhttps?:\/\/)\S*$/.test(upto)) return null;
     // A < brought its > with it (see the pairs); a left arrow takes that along.
     const closer = match[0][0] === '<' && becomes !== '⇔' && state.doc.textBetween(end, Math.min(end + 1, $start.end())) === '>';
     return state.tr.insertText(becomes, start, closer ? end + 1 : end);

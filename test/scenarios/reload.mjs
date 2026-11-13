@@ -15,7 +15,7 @@ export default async function ({ page, shot, run, type, work }) {
 
   await run(`cd ${work}`);
   const py = path.join(work, 'main.py');
-  await open('main');
+  await open('main.py');
 
   fs.writeFileSync(py, fs.readFileSync(py, 'utf8').replace('import sys', 'import sys  # AGENT-ONE'));
   await wait(700);

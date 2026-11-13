@@ -6,6 +6,8 @@ import type { EditorView } from '@milkdown/kit/prose/view';
 import { Fragment } from '@milkdown/kit/prose/model';
 import type { MarkType, Node as PMNode } from '@milkdown/kit/prose/model';
 import { $prose } from '@milkdown/kit/utils';
+import { motionKey } from './richMotion';
+import type { MotionMeta } from './richMotion';
 import { useStore } from './store';
 
 export type Cmd = (state: EditorState, dispatch?: (tr: Transaction) => void) => boolean;
@@ -263,7 +265,7 @@ export const lineBelow: Cmd = (state, dispatch) => {
   return true;
 };
 
-/** ⌘L: select the line; again, the line below as well. */
+/** ⌃L: select the line; again, the line below as well. */
 export const selectLines: Cmd = (state, dispatch) => {
   const { doc } = state;
   let sel: Selection | null = null;
@@ -295,15 +297,16 @@ export const selectLines: Cmd = (state, dispatch) => {
 };
 
 // ---------------------------------------------------------------------------------------------------------
-// Brackets, as the raw view has them for Markdown: ( [ ` * _ ~ typed over a selection go around it instead of
-// replacing it, and { [ ( < typed before a space or the end of a line bring their closing half, which is
+// Brackets and quotes: anything that encloses a phrase, ( [ { < " ' ` * _ and the curly quotes, typed over a
+// selection goes around it instead of replacing it, and { [ ( < typed before a space or the end of a line bring their closing half, which is
 // typed over, and deleted with Backspace, while the caret is still inside the pair.
 
 const CLOSERS: Record<string, string> = { '{': '}', '[': ']', '(': ')', '<': '>' };
-const WRAPS: Record<string, string> = { '(': ')', '[': ']', '`': '`', '*': '*', '_': '_', '~': '~' };
+// A tilde is only ever a tilde: striking words through has a key of its own (⇧⌘X, in richMarkdown.ts).
+const WRAPS: Record<string, string> = { '(': ')', '[': ']', '{': '}', '<': '>', '"': '"', "'": "'", '“': '”', '‘': '’', '`': '`', '*': '*', '_': '_' };
 // Markdown's own marks are not put in as characters, which this view would show (and save) as literal
 // asterisks: the words get what those characters mean in the file.
-const MARKS: Record<string, string> = { '`': 'inlineCode', '*': 'emphasis', '_': 'emphasis', '~': 'strike_through' };
+const MARKS: Record<string, string> = { '`': 'inlineCode', '*': 'emphasis', '_': 'emphasis' };
 function allMarked(doc: PMNode, from: number, to: number, type: MarkType) {
   let any = false;
   let all = true;
@@ -335,6 +338,7 @@ function wrap(view: EditorView, text: string) {
   } else {
     tr.insertText(close, sel.to).insertText(text, sel.from);
     tr.setSelection(TextSelection.create(tr.doc, sel.anchor + 1, sel.head + 1)); // still selected, so a second [ makes [[a link]]
+    tr.setMeta(motionKey, { grow: [[from, from + 1], [to + 1, to + 2]] } satisfies MotionMeta); // the pair grows in, so the words slide apart
   }
   if (tr.steps.length) view.dispatch(tr.scrollIntoView());
   return true;
@@ -449,6 +453,13 @@ export const caret = $prose(() => new Plugin({
     };
     // Once now, and once after layout has settled (fonts, images, a pane still sliding in).
     const sync = () => { place(); cancelAnimationFrame(frame); frame = requestAnimationFrame(place); };
+    // While text in the note is sliding (richMotion.ts, a heading's #s), the caret keeps up with it frame by frame.
+    let followUntil = 0;
+    let following = 0;
+    const follow = () => { place(); following = performance.now() < followUntil ? requestAnimationFrame(follow) : 0; };
+    const moving = () => { followUntil = performance.now() + 260; if (!following) following = requestAnimationFrame(follow); };
+    view.dom.addEventListener('animationstart', moving);
+    view.dom.addEventListener('transitionrun', moving);
     const sizes = new ResizeObserver(sync);
     sizes.observe(view.dom);
     view.dom.addEventListener('focus', sync);
@@ -462,7 +473,10 @@ export const caret = $prose(() => new Plugin({
         view.dom.removeEventListener('focus', sync);
         view.dom.removeEventListener('blur', sync);
         document.fonts.removeEventListener('loadingdone', sync);
+        view.dom.removeEventListener('animationstart', moving);
+        view.dom.removeEventListener('transitionrun', moving);
         cancelAnimationFrame(frame);
+        cancelAnimationFrame(following);
         clearTimeout(blink);
         host?.classList.remove('has-caret');
         el.remove();

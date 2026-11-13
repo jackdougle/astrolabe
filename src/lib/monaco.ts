@@ -6,8 +6,10 @@ import HtmlWorker from 'monaco-editor/language/html/html.worker?worker';
 import TsWorker from 'monaco-editor/language/typescript/ts.worker?worker';
 import { gemoji } from 'gemoji';
 import { api, basename, joinPath } from './api';
+import { carried, carry } from './handoff';
 import { getTheme, monacoTheme, Theme } from './themes';
 import { EXIT_MS } from './motion';
+import { bus } from './panes';
 import { useStore } from './store';
 
 (self as any).MonacoEnvironment = {
@@ -67,6 +69,17 @@ function syncWatch() {
 api.fs.onFileChanged((path) => { void refreshFile(path); });
 const loading = new Map<string, Promise<FileEntry | { error: string }>>();
 
+// A window reloading in place keeps unsaved typing and the commands run this session (see handoff.ts).
+interface CarriedFiles { unsaved: Record<string, string>; history: string[] }
+let left: CarriedFiles | null | undefined;
+const leftBehind = () => (left === undefined ? (left = carried<CarriedFiles>('files') ?? null) : left);
+carry('files', (): CarriedFiles => ({
+  unsaved: Object.fromEntries([...files].filter(([, e]) => !e.model.isDisposed() && isDirty(e)).map(([path, e]) => [path, e.model.getValue()])),
+  history,
+}));
+/** Settles when every file being opened has its text. */
+export const filesLoaded = () => Promise.allSettled([...loading.values()]);
+
 export function fileEntry(path: string) { return files.get(path); }
 
 export function loadFile(path: string): Promise<FileEntry | { error: string }> {
@@ -85,6 +98,8 @@ export function loadFile(path: string): Promise<FileEntry | { error: string }> {
       });
       files.set(path, entry);
       syncWatch();
+      const unsaved = leftBehind()?.unsaved[path];
+      if (unsaved !== undefined) { delete leftBehind()!.unsaved[path]; if (unsaved !== model.getValue()) model.setValue(unsaved); }
       return entry;
     })().finally(() => loading.delete(path));
     loading.set(path, p);
@@ -105,6 +120,7 @@ export async function saveFile(path: string) {
   entry.mtime = res.mtime;
   entry.conflict = undefined;
   useStore.getState().setDirty(path, isDirty(entry));
+  useStore.getState().keepFile(path); // a saved file's tab is no longer a temporary one
   return true;
 }
 
@@ -126,6 +142,9 @@ export function moveFiles(from: string, to: string) {
   }
   syncWatch();
 }
+
+// A temporary tab that gave its place to another file (`openFile` in store.ts).
+bus.on('file.closed', (path: string) => releaseFile(path));
 
 export function releaseFile(path: string) {
   // A closed file tab stays in its pane while it fades out, so check once it has gone.
@@ -202,6 +221,8 @@ let historyLoaded = false;
 export async function ensureHistory() {
   if (historyLoaded) return;
   historyLoaded = true;
+  const kept = leftBehind()?.history;
+  if (kept?.length) { history.unshift(...kept); return; }
   try { history.unshift(...((await api.shell.history()) as string[])); } catch {}
 }
 export function pushHistory(cmd: string) {

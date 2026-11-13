@@ -55,11 +55,19 @@ const userPathReady = new Promise<void>((resolve) => {
 });
 
 // ---------- updating from source ----------
-// An installed copy knows the folder it was built from. ⌘R (outside the editor) rebuilds from there when
-// the source has changed since this build, swaps the new app into place after this one quits, and reopens it.
+// An installed copy knows the folder it was built from. ⌘R brings it up to date with that
+// folder, doing no more than the change calls for:
+//   the interface (src/)            built straight into this copy in about a second; every window then reloads
+//                                   where it stands, with its shells still running
+//   the main process (electron/)    built straight into this copy, which then relaunches (that ends its shells)
+//   Electron, node-pty, the icon    the whole app is packaged again and swapped in, as `npm run install-app` does
 
-interface Stamp { source: string; builtAt: number }
-const SOURCE_PARTS = ['src', 'electron', 'index.html', 'package.json', 'vite.config.ts', 'build'];
+interface Stamp { source: string; builtAt: number; ui?: number; main?: number }
+const APP_DIR = app.getAppPath();
+const STAMP_FILE = path.join(APP_DIR, 'dist-electron', 'source.json');
+const UI_PARTS = ['src', 'index.html', 'vite.config.ts'];
+const MAIN_PARTS = ['electron'];
+const PACKAGE_PARTS = ['build'];
 async function newestMtime(p: string): Promise<number> {
   try {
     const st = await fsp.stat(p);
@@ -70,45 +78,136 @@ async function newestMtime(p: string): Promise<number> {
   } catch { return 0; }
 }
 function buildStamp(): Stamp | null {
-  const s = readJson<Stamp | null>(path.join(app.getAppPath(), 'dist-electron', 'source.json'), null);
+  const s = readJson<Stamp | null>(STAMP_FILE, null);
   return s?.source && fs.existsSync(path.join(s.source, 'package.json')) ? s : null;
 }
+/** What a packaged copy holds besides the two builds: its name and version, Electron, and the modules the main
+ *  process loads from node_modules instead of bundling. A difference here can only be fixed by packaging again. */
+function runtimeOf(dir: string, modules: string[], electron?: string) {
+  const pkg = readJson<any>(path.join(dir, 'package.json'), {});
+  const version = (name: string) => readJson<any>(path.join(dir, 'node_modules', name, 'package.json'), {}).version;
+  return JSON.stringify([pkg.name, pkg.productName, pkg.version, pkg.main, electron ?? version('electron'), modules.map((n) => `${n}@${version(n)}`)]);
+}
+async function pendingUpdate(stamp: Stamp) {
+  const newest = async (parts: string[]) => Math.max(0, ...(await Promise.all(parts.map((part) => newestMtime(path.join(stamp.source, part))))));
+  const [ui, main, extra] = await Promise.all([newest(UI_PARTS), newest(MAIN_PARTS), newest(PACKAGE_PARTS)]);
+  const mainAt = stamp.main ?? stamp.builtAt;
+  const script = String(readJson<any>(path.join(stamp.source, 'package.json'), {}).scripts?.['build:main'] ?? '');
+  const modules = [...script.matchAll(/--external:(\S+)/g)].map((m) => m[1]).filter((n) => n !== 'electron');
+  return {
+    ui: ui > (stamp.ui ?? stamp.builtAt),
+    main: main > mainAt,
+    // Run from its source folder there is nothing to package.
+    pack: app.isPackaged && (extra > mainAt || runtimeOf(stamp.source, modules) !== runtimeOf(APP_DIR, modules, process.versions.electron)),
+  };
+}
 let updating = false;
-async function checkUpdate(): Promise<'dev' | 'no-source' | 'current' | 'available' | 'busy'> {
-  if (!app.isPackaged) return 'dev';
+async function checkUpdate(): Promise<'dev' | 'no-source' | 'current' | 'reload' | 'relaunch' | 'busy'> {
+  if (process.env.ASTROLABE_DEV_URL) return 'dev';
   if (updating) return 'busy';
   const stamp = buildStamp();
   if (!stamp) return 'no-source';
-  let newest = 0;
-  for (const part of SOURCE_PARTS) newest = Math.max(newest, await newestMtime(path.join(stamp.source, part)));
-  return newest > stamp.builtAt ? 'available' : 'current';
+  const need = await pendingUpdate(stamp);
+  return need.main || need.pack ? 'relaunch' : need.ui ? 'reload' : 'current';
 }
-async function installUpdate(): Promise<{ ok: boolean; detail?: string }> {
+const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+function build(source: string, script: string) {
+  return new Promise<{ ok: boolean; out: string }>((resolve) => {
+    let out = '';
+    const child = spawn(USER_SHELL, ['-lc', script], { cwd: source, env: { ...stripSessionMarkers({ ...process.env }), PATH: userPath } });
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { out += d; });
+    child.on('close', (code) => resolve({ ok: code === 0, out }));
+    child.on('error', (err) => resolve({ ok: false, out: String(err) }));
+  });
+}
+/** The part of a failed build's output that says what went wrong: from its first error, else its last lines. */
+function lastLines(out: string) {
+  const lines = out.replace(/\x1b\[[0-9;]*m/g, '').split('\n').map((l) => l.trim()).filter(Boolean);
+  const at = lines.findIndex((l) => /\berror\b/i.test(l));
+  return (at >= 0 ? lines.slice(at, at + 3) : lines.slice(-3)).join(' ').slice(0, 240);
+}
+/** Quits and opens again. If the quit is called off (unsaved files), it reopens whenever Astrolabe next quits. */
+function relaunch(beforeOpen = '') {
+  const scripted = !!process.env.ASTROLABE_TEST; // a scripted run closes the app itself and must not see it come back
+  if (app.isPackaged) {
+    const bundle = path.resolve(APP_DIR, '..', '..', '..'); // …/Astrolabe.app
+    const script = `while kill -0 ${process.pid} 2>/dev/null; do sleep 0.1; done; ${beforeOpen}${scripted ? 'true' : `open ${q(bundle)}`}`;
+    spawn('/bin/sh', ['-c', script], { detached: true, stdio: 'ignore' }).unref();
+  } else if (!scripted) app.relaunch();
+  setTimeout(() => app.quit(), 200);
+}
+async function installUpdate(win: BrowserWindow | null, running: number): Promise<{ ok: boolean; detail?: string }> {
   const stamp = buildStamp();
   if (!stamp || updating) return { ok: false, detail: updating ? 'Already updating' : 'Source folder not found' };
   updating = true;
-  await userPathReady;
-  const result = await new Promise<{ code: number | null; out: string }>((resolve) => {
-    let out = '';
-    const child = spawn(USER_SHELL, ['-lc', 'npm run package'], { cwd: stamp.source, env: { ...stripSessionMarkers({ ...process.env }), PATH: userPath } });
-    child.stdout.on('data', (d) => { out += d; });
-    child.stderr.on('data', (d) => { out += d; });
-    child.on('close', (code) => resolve({ code, out }));
-    child.on('error', (err) => resolve({ code: -1, out: String(err) }));
-  });
-  const built = path.join(stamp.source, 'release', 'Astrolabe-darwin-arm64', 'Astrolabe.app');
-  if (result.code !== 0 || !fs.existsSync(built)) {
-    updating = false;
-    return { ok: false, detail: result.out.trim().split('\n').slice(-3).join(' ').slice(0, 240) || `exit ${result.code}` };
+  const need = await pendingUpdate(stamp);
+  const stay = (res: { ok: boolean; detail?: string }) => { updating = false; return res; };
+  if (!need.ui && !need.main && !need.pack) return stay({ ok: true, detail: 'Astrolabe is up to date' });
+  let restart = need.main || need.pack;
+  if (restart && running > 0 && !process.env.ASTROLABE_TEST) {
+    // A relaunch ends whatever the terminals are running, so it is never a surprise.
+    const buttons = need.ui ? ['Relaunch', 'Reload Window Only', 'Cancel'] : ['Relaunch', 'Cancel'];
+    const opts: Electron.MessageBoxOptions = {
+      type: 'question', buttons, defaultId: 0, cancelId: buttons.length - 1,
+      message: 'This update needs Astrolabe to relaunch.',
+      detail: `More than the interface has changed, and relaunching ends the ${running === 1 ? 'command' : `${running} commands`} running in your terminals.${need.ui ? ' Reloading the window alone keeps them running and brings in the changes to the interface.' : ''}`,
+    };
+    const choice = buttons[(win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts)).response];
+    if (choice === 'Cancel') return stay({ ok: true, detail: 'Not updated' });
+    if (choice !== 'Relaunch') restart = false;
   }
-  const bundle = path.resolve(app.getAppPath(), '..', '..', '..'); // …/Astrolabe.app
-  const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
-  // Waits for this copy to quit, then swaps the bundle and reopens. If the quit is called off (unsaved files),
-  // the swap happens whenever Astrolabe next quits.
-  const script = `while kill -0 ${process.pid} 2>/dev/null; do sleep 0.2; done; rm -rf ${q(bundle)} && ditto ${q(built)} ${q(bundle)} && rm -rf ${q(path.join(stamp.source, 'release'))}${process.env.ASTROLABE_TEST ? '' : ` && open ${q(bundle)}`}`;
-  spawn('/bin/sh', ['-c', script], { detached: true, stdio: 'ignore' }).unref();
-  setTimeout(() => app.quit(), 400);
-  return { ok: true };
+  await userPathReady;
+  const started = Date.now(); // not when the build ends: a file saved while it runs is newer than this build
+  if (restart && need.pack) {
+    const res = await build(stamp.source, 'npm run package');
+    const built = path.join(stamp.source, 'release', 'Astrolabe-darwin-arm64', 'Astrolabe.app');
+    if (!res.ok || !fs.existsSync(built)) return stay({ ok: false, detail: lastLines(res.out) || 'The build produced nothing' });
+    const bundle = path.resolve(APP_DIR, '..', '..', '..');
+    relaunch(`rm -rf ${q(bundle)} && ditto ${q(built)} ${q(bundle)} && rm -rf ${q(path.join(stamp.source, 'release'))} && `);
+    return { ok: true, detail: 'Relaunching…' };
+  }
+  // Both builds go into folders beside the ones in use and are swapped in only when they are whole.
+  const nextUi = path.join(APP_DIR, 'dist.next');
+  const nextMain = path.join(APP_DIR, 'dist-electron.next');
+  const lastUi = path.join(APP_DIR, 'dist.old');
+  const clear = (...dirs: string[]) => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); };
+  clear(nextUi, nextMain);
+  const results = await Promise.all([
+    need.ui ? build(stamp.source, `npm run build:ui -- --outDir ${q(nextUi)} --emptyOutDir`) : null,
+    restart ? build(stamp.source, `npm run build:main -- --outdir=${q(nextMain)}`) : null,
+  ]);
+  const failed = results.find((r) => r && !r.ok);
+  if (failed || (need.ui && !fs.existsSync(path.join(nextUi, 'index.html'))) || (restart && !fs.existsSync(path.join(nextMain, 'main.cjs')))) {
+    clear(nextUi, nextMain);
+    return stay({ ok: false, detail: (failed && lastLines(failed.out)) || 'The build produced nothing' });
+  }
+  try {
+    if (need.ui) { clear(lastUi); fs.renameSync(DIST, lastUi); fs.renameSync(nextUi, DIST); }
+    if (restart) for (const f of fs.readdirSync(nextMain)) fs.renameSync(path.join(nextMain, f), path.join(APP_DIR, 'dist-electron', f));
+  } catch (err: any) {
+    if (!fs.existsSync(DIST) && fs.existsSync(lastUi)) fs.renameSync(lastUi, DIST);
+    clear(nextUi, nextMain);
+    return stay({ ok: false, detail: String(err?.message ?? err).slice(0, 240) });
+  }
+  clear(nextMain);
+  if (restart) {
+    writeJson(STAMP_FILE, { ...stamp, ui: need.ui ? started : stamp.ui, main: started });
+    clear(lastUi);
+    relaunch();
+    return { ok: true, detail: 'Relaunching…' };
+  }
+  // Only the interface changed: every window reloads where it stands and its shells never notice.
+  writeJson(STAMP_FILE, { ...stamp, ui: started });
+  const windows = BrowserWindow.getAllWindows();
+  const up = await Promise.all(windows.map((w) => reloadWindow(w, 'Updated')));
+  if (up.every(Boolean)) { clear(lastUi); return stay({ ok: true }); }
+  // The new build never drew its first screen. Put the last one back rather than leave a blank window.
+  clear(DIST);
+  fs.renameSync(lastUi, DIST);
+  writeJson(STAMP_FILE, stamp);
+  await Promise.all(windows.filter((w) => !w.isDestroyed()).map((w) => reloadWindow(w, 'The new build did not start, so the last one is back')));
+  return stay({ ok: false, detail: 'The new build did not start' });
 }
 
 // ---------- terminal sessions ----------
@@ -116,8 +215,23 @@ async function installUpdate(): Promise<{ ok: boolean; detail?: string }> {
 const unsaved = new Map<number, number>();
 let testMenuChoice: string | null = null;
 
-interface Session { proc: pty.IPty; wc: WebContents; buf: string; timer: NodeJS.Timeout | null }
+interface Session {
+  proc: pty.IPty; wc: WebContents; buf: string; timer: NodeJS.Timeout | null;
+  /** Its window is reloading in place: output waits instead of going to a page that is not there. */
+  held: boolean;
+  /** Output since the reloading page described its screen. The new page starts from that description, so it
+   *  is sent this too; it is kept until that page is up, in case the reload has to be done again. */
+  since: string | null; cut: number;
+  /** It ended while held; the new page is told when it takes over. */
+  exit: number | null;
+}
 const sessions = new Map<string, Session>();
+function flushSession(id: string, s: Session) {
+  if (s.timer) { clearTimeout(s.timer); s.timer = null; }
+  if (!s.buf) return;
+  const data = s.buf; s.buf = '';
+  if (!s.wc.isDestroyed()) s.wc.send('pty:data', id, data);
+}
 let integrationDir: string | null = null;
 
 const noteDate = (d = new Date()) => `${String(d.getMonth() + 1).padStart(2, '0')}.${String(d.getDate()).padStart(2, '0')}.${d.getFullYear()}`;
@@ -142,6 +256,9 @@ function spawnSession(wc: WebContents, id: string, opts: { cwd?: string; cols: n
   let cwd = opts.cwd ? expandHome(opts.cwd) : os.homedir();
   try { if (!fs.statSync(cwd).isDirectory()) cwd = os.homedir(); } catch { cwd = os.homedir(); }
   const isZsh = path.basename(USER_SHELL) === 'zsh';
+  // A page that starts a shell under an id already in use has no further use for the old one.
+  const old = sessions.get(id);
+  if (old) { sessions.delete(id); try { old.proc.kill(); } catch {} }
   const proc = pty.spawn(USER_SHELL, ['-l'], {
     name: 'xterm-256color',
     cols: Math.max(2, opts.cols),
@@ -149,26 +266,98 @@ function spawnSession(wc: WebContents, id: string, opts: { cwd?: string; cols: n
     cwd,
     env: shellEnv(USER_SHELL, isZsh ? integrationDir : null, opts.prompt ?? 'native') as { [k: string]: string },
   });
-  const s: Session = { proc, wc, buf: '', timer: null };
+  const s: Session = { proc, wc, buf: '', timer: null, held: false, since: null, cut: 0, exit: null };
   sessions.set(id, s);
-  const flush = () => {
-    s.timer = null;
-    if (!s.buf) return;
-    const data = s.buf; s.buf = '';
-    if (!wc.isDestroyed()) wc.send('pty:data', id, data);
-  };
   proc.onData((d) => {
+    if (s.since !== null) { s.since += d; if (s.since.length > 64 << 20) s.since = s.since.slice(-(32 << 20)); }
+    if (s.held) return;
     s.buf += d;
-    if (s.buf.length > 1 << 16) { if (s.timer) clearTimeout(s.timer); flush(); }
-    else if (!s.timer) s.timer = setTimeout(flush, 4);
+    if (s.buf.length > 1 << 16) flushSession(id, s);
+    else if (!s.timer) s.timer = setTimeout(() => flushSession(id, s), 4);
   });
   proc.onExit(({ exitCode }) => {
-    if (s.timer) clearTimeout(s.timer);
-    flush();
+    if (sessions.get(id) !== s) return; // killed, or replaced under the same id
+    if (s.held) { s.exit = exitCode; return; }
+    flushSession(id, s);
     sessions.delete(id);
-    if (!wc.isDestroyed()) wc.send('pty:exit', id, exitCode);
+    if (!s.wc.isDestroyed()) s.wc.send('pty:exit', id, exitCode);
   });
   return { integrated: isZsh && !!integrationDir, shell: USER_SHELL };
+}
+
+/** The page that replaced a reloaded one takes a shell back, along with what it printed in between. */
+function attachSession(wc: WebContents, id: string) {
+  const s = sessions.get(id);
+  if (!s) return false;
+  if (s.timer) { clearTimeout(s.timer); s.timer = null; }
+  s.buf = '';
+  s.wc = wc;
+  s.held = false;
+  if (s.since) wc.send('pty:data', id, s.since);
+  if (s.exit !== null) { sessions.delete(id); wc.send('pty:exit', id, s.exit); }
+  return true;
+}
+
+// ---------- reloading a window in place ----------
+// The page is replaced; the window, this process and the shells are not. The old page describes itself first
+// (src/lib/handoff.ts), the shells' output is held while there is no page to take it, and a picture of the
+// window covers the gap until the new page has drawn (the preload script shows it).
+
+const handoffs = new Map<number, Record<string, unknown>>();
+const shots = new Map<number, Buffer>();
+const bootWaiters = new Map<number, (up: boolean) => void>();
+const reloading = new Set<number>();
+let prepareSeq = 0;
+
+function askPage(wc: WebContents, ms: number) {
+  return new Promise<Record<string, unknown> | null>((resolve) => {
+    const token = ++prepareSeq;
+    const done = (data: Record<string, unknown> | null) => { clearTimeout(timer); ipcMain.removeListener('app:handoff', heard); resolve(data); };
+    const heard = (e: Electron.IpcMainEvent, t: number, data: Record<string, unknown> | null) => { if (e.sender === wc && t === token) done(data ?? null); };
+    const timer = setTimeout(() => done(null), ms);
+    ipcMain.on('app:handoff', heard);
+    wc.send('app:prepareReload', token);
+  });
+}
+
+/** Reloads a window where it stands. Resolves true once the new page is up, false if it never drew. */
+async function reloadWindow(win: BrowserWindow, note?: string): Promise<boolean> {
+  const wc = win.webContents;
+  if (win.isDestroyed() || reloading.has(wc.id)) return false;
+  reloading.add(wc.id);
+  try {
+    const mine = [...sessions].filter(([, s]) => s.wc === wc);
+    // Everything printed so far reaches the page before it is asked to describe itself; nothing after does.
+    for (const [id, s] of mine) { flushSession(id, s); s.held = true; s.cut = s.since?.length ?? 0; if (s.since === null) s.since = ''; }
+    const [data, image] = await Promise.all([askPage(wc, 5000), wc.capturePage().catch(() => null)]);
+    if (wc.isDestroyed()) return false;
+    if (data) {
+      handoffs.set(wc.id, data);
+      for (const [, s] of mine) s.since = (s.since ?? '').slice(s.cut);
+      if (image && !image.isEmpty()) shots.set(wc.id, image.toPNG()); else shots.delete(wc.id);
+    } // a page that cannot answer keeps what the page before it left: its description and its picture
+    const kept = handoffs.get(wc.id);
+    if (kept) { if (note) kept.note = note; else delete kept.note; }
+    const up = new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => { bootWaiters.delete(wc.id); resolve(false); }, 8000);
+      bootWaiters.set(wc.id, (ok) => { clearTimeout(timer); bootWaiters.delete(wc.id); resolve(ok); });
+    });
+    wc.reloadIgnoringCache();
+    return await up;
+  } finally { reloading.delete(wc.id); }
+}
+
+/** A page has drawn its first screen (after a reload: with its terminals back). */
+function pageBooted(wc: WebContents) {
+  handoffs.delete(wc.id);
+  shots.delete(wc.id);
+  for (const [id, s] of sessions) {
+    if (s.wc !== wc) continue;
+    s.since = null;
+    // A shell the new page did not take back has no terminal any more.
+    if (s.held) { sessions.delete(id); try { s.proc.kill(); } catch {} }
+  }
+  bootWaiters.get(wc.id)?.(true);
 }
 
 function killSessionsFor(wc: WebContents) {
@@ -196,7 +385,8 @@ async function readDir(dir: string) {
 
 async function listFiles(root: string): Promise<string[]> {
   await userPathReady;
-  const viaRg = await run('rg', ['--files', '--hidden', '-g', '!.git', '-g', '!node_modules'], { cwd: root, timeout: 8000, maxBuffer: 64 * 1024 * 1024 });
+  // Most recently changed first, so the file picker opens on what was worked on last.
+  const viaRg = await run('rg', ['--files', '--hidden', '--sortr', 'modified', '-g', '!.git', '-g', '!node_modules'], { cwd: root, timeout: 8000, maxBuffer: 64 * 1024 * 1024 });
   if (viaRg) return viaRg.split('\n').filter(Boolean).slice(0, 40000);
   const out: string[] = [];
   const walk = async (dir: string, rel: string, depth: number) => {
@@ -401,6 +591,8 @@ function createWindow() {
       if (animateWindows() && win.isVisible() && !win.isFullScreen()) { ev.preventDefault(); fadeWindow(win, 0, 150, () => win.close()); return; }
     }
     unsaved.delete(wc.id);
+    handoffs.delete(wc.id);
+    shots.delete(wc.id);
     const s = readJson<Record<string, unknown>>(STATE_FILE, {});
     writeJson(STATE_FILE, { ...s, bounds: win.getBounds() });
     killSessionsFor(wc);
@@ -446,7 +638,7 @@ function buildMenu() {
       { label: 'Switch Displays', accelerator: 'Ctrl+Cmd+S', click: send('editor.swapSide') },
       { label: 'Toggle Full Screen', click: () => { const w = BrowserWindow.getFocusedWindow(); w?.setFullScreen(!w.isFullScreen()); } },
       { label: 'Developer Tools', accelerator: 'Alt+CmdOrCtrl+I', click: () => BrowserWindow.getFocusedWindow()?.webContents.toggleDevTools() },
-      { label: 'Reload Window', accelerator: 'Alt+CmdOrCtrl+R', click: () => BrowserWindow.getFocusedWindow()?.webContents.reload() },
+      { label: 'Reload Window', accelerator: 'Alt+CmdOrCtrl+R', click: () => { const w = BrowserWindow.getFocusedWindow(); if (w) void reloadWindow(w); } },
     ] },
     { label: 'Window', submenu: [{ role: 'minimize' }, { role: 'zoom' }, { type: 'separator' }, { role: 'front' }] },
   ]));
@@ -498,6 +690,24 @@ function watchFiles(sender: WebContents, paths: string[]) {
   }
 }
 
+// ---------- files opened from outside ----------
+// `open -a Astrolabe note.md`, or a file dropped on the Dock icon, opens that file in the window in front, the way
+// ⌘-clicking its path in a terminal would. Paths wait here until a page collects them, so one that arrives while
+// the app is still starting, or its window is reloading, is not lost.
+const outsideFiles: string[] = [];
+let frontWindow: BrowserWindow | null = null;
+app.on('browser-window-focus', (_e, win) => { frontWindow = win; });
+app.on('open-file', (e, file) => {
+  e.preventDefault();
+  if (!fs.statSync(file, { throwIfNoEntry: false })?.isFile()) return;
+  outsideFiles.push(file);
+  const win = BrowserWindow.getFocusedWindow() ?? (frontWindow && !frontWindow.isDestroyed() ? frontWindow : BrowserWindow.getAllWindows().find((w) => !w.isDestroyed()));
+  if (!win) return; // still starting: the first page collects it once it is up
+  if (win.isMinimized()) win.restore();
+  win.focus();
+  win.webContents.send('app:outsideFiles');
+});
+
 // ---------- ipc ----------
 
 function registerIpc() {
@@ -506,6 +716,7 @@ function registerIpc() {
   ipcMain.on('pty:resize', (_e, id: string, cols: number, rows: number) => {
     try { sessions.get(id)?.proc.resize(Math.max(2, cols), Math.max(2, rows)); } catch {}
   });
+  ipcMain.handle('pty:attach', (e, id: string) => attachSession(e.sender, id));
   ipcMain.on('pty:kill', (_e, id: string) => { const s = sessions.get(id); if (s) { try { s.proc.kill(); } catch {} sessions.delete(id); } });
 
   ipcMain.handle('fs:readDir', (_e, dir: string) => readDir(dir).catch(() => []));
@@ -535,6 +746,19 @@ function registerIpc() {
       // A case-only change (notes.md to Notes.md) points at the same file on macOS, which is fine.
       const clash = await fsp.stat(to).then(() => true, () => false);
       if (clash && to.toLowerCase() !== from.toLowerCase()) return { error: `"${clean}" already exists here.` };
+      await fsp.rename(from, to);
+      return { path: to };
+    } catch (err: any) { return { error: String(err?.message ?? err) }; }
+  });
+  // A file or folder dragged onto a folder in the navigator goes into it under its own name.
+  ipcMain.handle('fs:move', async (_e, from: string, dir: string) => {
+    const name = path.basename(from);
+    const to = path.join(dir, name);
+    if (to === from) return { path: from };
+    if (dir === from || dir.startsWith(from + path.sep)) return { error: 'A folder cannot go inside itself.' };
+    try {
+      if (!(await fsp.stat(dir)).isDirectory()) return { error: 'That is not a folder.' };
+      if (await fsp.stat(to).then(() => true, () => false)) return { error: `"${name}" already exists there.` };
       await fsp.rename(from, to);
       return { path: to };
     } catch (err: any) { return { error: String(err?.message ?? err) }; }
@@ -593,7 +817,12 @@ function registerIpc() {
     return (['save', 'discard', 'cancel'] as const)[res.response] ?? 'cancel';
   });
   ipcMain.handle('app:checkUpdate', () => checkUpdate());
-  ipcMain.handle('app:installUpdate', () => installUpdate());
+  ipcMain.handle('app:installUpdate', (e, running: number) => installUpdate(BrowserWindow.fromWebContents(e.sender), Number(running) || 0));
+  ipcMain.handle('app:takeHandoff', (e) => handoffs.get(e.sender.id) ?? null);
+  ipcMain.handle('app:takeOutsideFiles', () => outsideFiles.splice(0));
+  ipcMain.on('app:shot', (e) => { e.returnValue = shots.has(e.sender.id) ? e.sender.id : 0; });
+  ipcMain.on('app:booted', (e) => pageBooted(e.sender));
+  ipcMain.on('app:bootFailed', (e) => bootWaiters.get(e.sender.id)?.(false));
   ipcMain.on('app:unsavedCount', (e, n: number) => { unsaved.set(e.sender.id, n); });
   ipcMain.handle('dialog:pickFiles', async (e, defaultPath?: string) => {
     const win = BrowserWindow.fromWebContents(e.sender);
@@ -610,6 +839,56 @@ function registerIpc() {
       catch (err: any) { if (err?.code !== 'EEXIST') return { error: String(err?.message ?? err) }; }
     }
     return { error: 'Too many untitled notes in this folder.' };
+  });
+  // Something pasted or dropped that is not a file on disk (a screenshot on the clipboard, a picture dragged out of
+  // a browser) is saved here so that it has a path to hand to a program. Copies older than two weeks are cleared out.
+  ipcMain.handle('fs:savePasted', async (_e, name: string, data: Uint8Array) => {
+    const dir = path.join(CONFIG_DIR, 'pasted');
+    try {
+      await fsp.mkdir(dir, { recursive: true });
+      const old = Date.now() - 14 * 86400_000;
+      for (const f of await fsp.readdir(dir)) { const p = path.join(dir, f); try { if ((await fsp.stat(p)).mtimeMs < old) await fsp.unlink(p); } catch {} }
+      const d = new Date();
+      const two = (n: number) => String(n).padStart(2, '0');
+      const stamp = `${d.getFullYear()}${two(d.getMonth() + 1)}${two(d.getDate())}-${two(d.getHours())}${two(d.getMinutes())}${two(d.getSeconds())}`;
+      const clean = path.basename(String(name || 'file')).replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '') || 'file';
+      for (let i = 0; i < 100; i++) {
+        const file = path.join(dir, `${stamp}${i ? `-${i}` : ''}-${clean}`);
+        try { await fsp.writeFile(file, data, { flag: 'wx' }); return { path: file }; }
+        catch (err: any) { if (err?.code !== 'EEXIST') throw err; }
+      }
+      return { error: 'Could not find a free name for it.' };
+    } catch (err: any) { return { error: String(err?.message ?? err) }; }
+  });
+  // A picture put into a note from somewhere else on the disk is copied into `attachments` beside the note, so the
+  // note's folder holds everything the note shows. The same picture brought in twice is kept once.
+  ipcMain.handle('fs:importImage', async (_e, noteDir: string, from: string) => {
+    try {
+      const dir = path.join(noteDir, 'attachments');
+      const data = await fsp.readFile(from);
+      await fsp.mkdir(dir, { recursive: true });
+      const ext = path.extname(from);
+      // Pasted pictures arrive stamped with the time (see fs:savePasted), so their names do not collide.
+      const stem = path.basename(from, ext).replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '') || 'image';
+      for (let n = 0; n < 500; n++) {
+        const to = path.join(dir, `${stem}${n ? `-${n}` : ''}${ext}`);
+        const there = await fsp.readFile(to).catch(() => null);
+        if (there?.equals(data)) return { path: to };
+        if (!there) { await fsp.writeFile(to, data, { flag: 'wx' }); return { path: to }; }
+      }
+      return { error: 'Too many pictures with that name.' };
+    } catch (err: any) { return { error: String(err?.message ?? err) }; }
+  });
+  // Uploading is whatever command the `imageUpload` setting names: it is given the picture's path as its last
+  // argument and prints the web address the picture can then be seen at. Nothing is sent anywhere unless that is set.
+  ipcMain.handle('fs:uploadImage', async (_e, command: string, file: string) => {
+    await userPathReady;
+    return new Promise<{ url?: string; error?: string }>((resolve) => {
+      execFile('/bin/sh', ['-c', `${command} "$0"`, file], { timeout: 120000, maxBuffer: 1024 * 1024, env: { ...process.env, PATH: userPath } }, (err, stdout, stderr) => {
+        const url = String(stdout ?? '').trim().split(/\s+/).reverse().find((word) => /^https?:\/\/\S+$/.test(word));
+        resolve(!err && url ? { url } : { error: (String(stderr ?? '').trim() || err?.message || 'the command printed no web address').slice(0, 300) });
+      });
+    });
   });
   // A ⌘N note closed with nothing added is deleted. `text` is what it was made with; a file holding anything else is left alone.
   ipcMain.handle('fs:discardBlank', async (_e, file: string, text: string) => {
@@ -637,11 +916,23 @@ function registerIpc() {
   ipcMain.handle('clipboard:read', () => clipboard.readText());
 }
 
+const PICTURE = /\.(png|jpe?g|gif|webp|svg|avif|bmp|heic|ico|tiff?)$/i;
 app.whenReady().then(() => {
   protocol.handle('astrolabe', (req) => {
     const u = new URL(req.url);
     let p = decodeURIComponent(u.pathname);
     if (p === '/' || p === '') p = '/index.html';
+    const shot = /^\/__shot\/(\d+)\.png$/.exec(p);
+    if (shot) {
+      const png = shots.get(Number(shot[1]));
+      return png ? new Response(new Uint8Array(png), { headers: { 'content-type': 'image/png', 'cache-control': 'no-store' } }) : new Response('Not found', { status: 404 });
+    }
+    // A picture in a note is a file on disk, which a page served from here may not load by its own path.
+    const local = /^\/__file(\/.+)$/.exec(p);
+    if (local) {
+      if (!PICTURE.test(local[1])) return new Response('Not found', { status: 404 });
+      return net.fetch(pathToFileURL(local[1]).toString()).catch(() => new Response('Not found', { status: 404 }));
+    }
     const file = path.normalize(path.join(DIST, p));
     if (!file.startsWith(DIST)) return new Response('Not found', { status: 404 });
     return net.fetch(pathToFileURL(file).toString());
@@ -665,7 +956,7 @@ function setAppActive(active: boolean) {
 }
 app.on('browser-window-focus', () => setAppActive(true));
 app.on('browser-window-blur', () => { setTimeout(() => { if (!BrowserWindow.getFocusedWindow()) setAppActive(false); }, 60); });
-app.on('browser-window-created', (_e, w) => { w.webContents.once('did-finish-load', () => w.webContents.send('win:focus', appActive)); });
+app.on('browser-window-created', (_e, w) => { w.webContents.on('did-finish-load', () => w.webContents.send('win:focus', appActive)); });
 
 app.on('window-all-closed', () => { app.quit(); });
 app.on('before-quit', () => { quitting = true; for (const s of sessions.values()) { try { s.proc.kill(); } catch {} } });

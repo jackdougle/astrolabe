@@ -5,15 +5,15 @@ import { applyHeadingFont, applyNotesFont, FontInfo, googleFonts, loadGoogleFont
 import { fuzzyFilter } from '../lib/fuzzy';
 import { history, MONO, setMonacoTheme } from '../lib/monaco';
 import { bus, focusPane } from '../lib/panes';
-import { activeTermPane, PaletteMode, projectRoot, Settings, useStore } from '../lib/store';
+import { activeTermPane, focusedId, isMarkdown, PaletteMode, projectRoot, Settings, useStore } from '../lib/store';
 import { applyTheme, getTheme, THEMES } from '../lib/themes';
 
-interface Row { key: string; label: string; detail?: string; hint?: string; positions?: number[]; run: () => void; preview?: () => void; /** CSS font stack the label is drawn in. */ face?: string; /** Google Fonts family to fetch once the row is on screen. */ load?: string }
+interface Row { key: string; label: string; detail?: string; hint?: string; positions?: number[]; /** `side`: chosen with ⌘ held. */ run: (side?: boolean) => void; preview?: () => void; /** CSS font stack the label is drawn in. */ face?: string; /** Google Fonts family to fetch once the row is on screen. */ load?: string }
 const LITERATA_FACE = '"Literata Variable", Georgia, serif';
 
 const PLACEHOLDER: Record<PaletteMode, string> = {
   commands: 'Run a command',
-  files: 'Open a file by name. Type > for commands',
+  files: 'Open a note by name, last edited first (⌘↩: to the side). A . brings in other files, > commands',
   history: 'Search past commands',
   themes: 'Choose a theme',
   'fonts-notes': 'Search Google Fonts for the text of notes',
@@ -74,11 +74,11 @@ function PaletteBody({ initial }: { initial: PaletteMode }) {
   const close = (refocus = true) => {
     revertPreview();
     useStore.getState().closePalette();
-    if (refocus) { const s = useStore.getState(); const t = s.tabs.find((x) => x.id === s.activeTab); if (t) focusPane(t.activePane); }
+    if (refocus) { const id = focusedId(); if (id) focusPane(id); }
   };
   const go = (next: PaletteMode) => { revertPreview(); setMode(next); setQuery(''); };
   const back = () => { const parent = PARENT[mode]; if (parent) go(parent); else close(); };
-  const flip = (key: 'wordWrap' | 'smoothCaret' | 'restoreSession' | 'starfield') => {
+  const flip = (key: 'wordWrap' | 'smoothCaret' | 'restoreSession' | 'previewTabs' | 'starfield') => {
     const patch: Partial<Settings> = { [key]: !useStore.getState().settings[key] };
     useStore.getState().updateSettings(patch);
   };
@@ -133,6 +133,7 @@ function PaletteBody({ initial }: { initial: PaletteMode }) {
       return choose([
         { key: 'wrap', label: 'Word wrap in the editor', detail: on(settings.wordWrap), hint: formatKeys('alt+z'), run: () => flip('wordWrap') },
         { key: 'caret', label: 'Smooth caret', detail: on(settings.smoothCaret), run: () => flip('smoothCaret') },
+        { key: 'preview', label: 'Temporary tabs for opened files', detail: on(settings.previewTabs), run: () => flip('previewTabs') },
         { key: 'restore', label: 'Reopen last session on launch', detail: on(settings.restoreSession), run: () => flip('restoreSession') },
         { key: 'scroll', label: `Scroll speed ${settings.scrollSpeed}×`, detail: `click for ${next}×`, run: () => useStore.getState().updateSettings({ scrollSpeed: next }) },
       ]);
@@ -184,19 +185,45 @@ function PaletteBody({ initial }: { initial: PaletteMode }) {
       const usable = commands.filter((c) => !/^tab\.\d$/.test(c.id) && (!c.when || c.when()));
       return fuzzyFilter(query, usable, (c) => c.title, 60).map((h) => ({
         key: h.item.id, label: h.item.title, positions: h.positions, hint: h.item.keys?.[0] ? formatKeys(h.item.keys[0]) : undefined,
-        run: () => { close(false); h.item.run(); if (!useStore.getState().palette) { const s = useStore.getState(); const t = s.tabs.find((x) => x.id === s.activeTab); if (t && !['sidebar.search'].includes(h.item.id)) focusPane(t.activePane); } },
+        run: () => { close(false); h.item.run(); if (!useStore.getState().palette) { const id = focusedId(); if (id && !['sidebar.search'].includes(h.item.id)) focusPane(id); } },
       }));
     }
     if (mode === 'files') {
       if (!files) return [];
-      return fuzzyFilter(query, files, (f) => f, 60).map((h) => {
-        const slash = h.item.lastIndexOf('/');
+      // What sits inside a dot folder (.git, .venv, .claude, .obsidian) is machinery, not something to go looking for:
+      // it is left out unless the search itself asks for one, with a part that starts with a dot.
+      const seen = /(^|[/\s])\./.test(query) ? files : files.filter((f) => !/(^|\/)\.[^/]+\//.test(f));
+      // Notes only. A dot anywhere in the search (an extension such as .ts, a dot folder) brings in every other kind of file.
+      const pool = query.includes('.') ? seen : seen.filter(isMarkdown);
+      const row = (rel: string, positions: number[]): Row => {
+        const slash = rel.lastIndexOf('/');
         return {
-          key: h.item, label: basename(h.item), detail: slash >= 0 ? h.item.slice(0, slash) : '',
-          positions: h.positions.filter((p) => p > slash).map((p) => p - slash - 1),
-          run: () => { close(false); useStore.getState().openFile(`${root}/${h.item}`); },
+          key: rel, label: basename(rel), detail: slash >= 0 ? rel.slice(0, slash) : '', positions,
+          // In the editor used last; with ⌘, in a new editor beside it.
+          run: (side?: boolean) => { close(false); useStore.getState().openFile(`${root}/${rel}`, null, side ? { beside: 'right' } : undefined); },
         };
+      };
+      // The list arrives last edited first, and that order is kept: with nothing typed, and for every file whose name
+      // holds each typed word. Looser matches (letters spread through the path) follow, best match first.
+      const LIMIT = 60;
+      const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+      if (!words.length) return pool.slice(0, LIMIT).map((f) => row(f, []));
+      const named: Row[] = [];
+      const taken = new Set<string>();
+      for (const f of pool) {
+        if (named.length >= LIMIT) break;
+        const name = basename(f).toLowerCase();
+        const at = words.map((w) => name.indexOf(w));
+        if (at.some((i) => i < 0)) continue;
+        taken.add(f);
+        named.push(row(f, at.flatMap((i, k) => Array.from({ length: words[k].length }, (_, j) => i + j))));
+      }
+      if (named.length >= LIMIT) return named;
+      const loose = fuzzyFilter(query, pool.filter((f) => !taken.has(f)), (f) => f, LIMIT - named.length).map((h) => {
+        const slash = h.item.lastIndexOf('/');
+        return row(h.item, h.positions.filter((p) => p > slash).map((p) => p - slash - 1));
       });
+      return [...named, ...loose];
     }
     if (mode === 'history') {
       const recent = [...history].reverse();
@@ -238,7 +265,7 @@ function PaletteBody({ initial }: { initial: PaletteMode }) {
     if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); back(); }
     else if (e.key === 'ArrowDown' || (e.ctrlKey && e.key === 'n')) { e.preventDefault(); setIndex((i) => Math.min(rows.length - 1, i + 1)); }
     else if (e.key === 'ArrowUp' || (e.ctrlKey && e.key === 'p')) { e.preventDefault(); setIndex((i) => Math.max(0, i - 1)); }
-    else if (e.key === 'Enter') { e.preventDefault(); rows[index]?.run(); }
+    else if (e.key === 'Enter') { e.preventDefault(); rows[index]?.run(e.metaKey); }
   };
   const onChange = (v: string) => {
     if (mode === 'files' && v.startsWith('>')) { setMode('commands'); setQuery(v.slice(1).trimStart()); return; }
@@ -246,7 +273,7 @@ function PaletteBody({ initial }: { initial: PaletteMode }) {
   };
 
   const empty = mode === 'files' && !files ? 'Listing files…'
-    : mode === 'files' ? 'No file matches that name.'
+    : mode === 'files' ? (query.includes('.') ? 'No file matches that name.' : 'No note matches that name. Type a . to look through every file.')
     : mode === 'history' ? (history.length ? 'No past command matches.' : 'No command history yet.')
     : (mode === 'fonts-notes' || mode === 'fonts-headings' || mode === 'fonts-code') ? (!fonts ? 'Fetching the Google Fonts list…' : fonts.length ? 'No font matches that name.' : 'Could not reach Google Fonts. Check your connection.')
     : 'Nothing matches.';
@@ -259,7 +286,7 @@ function PaletteBody({ initial }: { initial: PaletteMode }) {
         <div className="palette-list" ref={listRef} onMouseDown={(e) => e.preventDefault()}>
           {rows.length === 0 && <div className="palette-empty">{empty}</div>}
           {rows.map((r, i) => (
-            <div key={r.key} data-font={r.load} className={`palette-row${i === index ? ' is-selected' : ''}${mode === 'history' ? ' is-mono' : ''}`} onMouseMove={() => i !== index && setIndex(i)} onClick={() => r.run()}>
+            <div key={r.key} data-font={r.load} className={`palette-row${i === index ? ' is-selected' : ''}${mode === 'history' ? ' is-mono' : ''}`} onMouseMove={() => i !== index && setIndex(i)} onClick={(e) => r.run(e.metaKey)}>
               <span className="palette-label" style={r.face ? { fontFamily: r.face } : undefined}><Highlight text={r.label} positions={r.positions} /></span>
               {r.detail && <span className="palette-detail">{r.detail}</span>}
               {r.hint && <kbd>{r.hint}</kbd>}

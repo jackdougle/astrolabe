@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { carried, carry } from '../lib/handoff';
 import { api, basename, dirname, tildify } from '../lib/api';
-import { createEntry, renameEntry, trashEntries } from '../lib/commands';
+import { createEntry, dropEntries, moveEntries, renameEntry, trashEntries } from '../lib/commands';
 import { exitDelay, reducedMotion } from '../lib/motion';
 import { bus, focusPane } from '../lib/panes';
-import { projectRoot, SidebarView, useStore } from '../lib/store';
+import { focusedId, projectRoot, SidebarView, useStore } from '../lib/store';
 import { Icon } from './Icons';
 import { tip } from './Tooltip';
 
@@ -79,9 +81,10 @@ interface Entry { name: string; path: string; dir: boolean }
 function FileTree({ views }: { views: Views }) {
   const root = useStore((s) => projectRoot(s));
   const openFile = useStore((s) => s.openFile);
-  const activeFile = useStore((s) => { const t = s.tabs.find((x) => x.id === s.activeTab); const p = t && s.panes[t.activePane]; return p?.kind === 'editor' ? p.active : null; });
+  // The file in the editor used last: its row is lit, and the folders it is in are opened so that it shows.
+  const activeFile = useStore((s) => { const p = s.editors.root ? s.panes[s.editors.active] : null; return p?.kind === 'editor' ? p.active : null; });
   const [children, setChildren] = useState<Record<string, Entry[]>>({});
-  const [open, setOpen] = useState<Record<string, boolean>>({});
+  const [open, setOpen] = useState<Record<string, boolean>>(() => carried<Record<string, boolean>>('tree') ?? {}); // folders stay open through a window reload
   const [showHidden, setShowHidden] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
   // The folder a new file is being named in, if any.
@@ -103,7 +106,7 @@ function FileTree({ views }: { views: Views }) {
     return out;
   };
   const onRowClick = (ev: React.MouseEvent, e: Entry) => {
-    if (renaming === e.path) return;
+    if (renaming === e.path || dragged.current) return;
     if (ev.shiftKey) {
       const rows = visible();
       const to = rows.indexOf(e.path);
@@ -115,7 +118,8 @@ function FileTree({ views }: { views: Views }) {
     anchor.current = e.path;
     if (ev.metaKey) { setSelected((s) => (s.includes(e.path) ? s.filter((p) => p !== e.path) : [...s, e.path])); return; }
     setSelected([e.path]);
-    if (e.dir) toggle(e); else openFile(e.path);
+    // ⌥-click, as in VS Code, opens the file to the side: in a new editor beside the one used last.
+    if (e.dir) toggle(e); else openFile(e.path, null, ev.altKey ? { beside: 'right' } : undefined);
   };
   // Right-clicking a folder puts the new file inside it, a file beside it, and anywhere else at the top of the project.
   // On one of several selected rows the menu is about all of them; on any other row, that row becomes the selection.
@@ -140,6 +144,88 @@ function FileTree({ views }: { views: Views }) {
   const openRef = useRef(open);
   openRef.current = open;
 
+  // Rows are dragged as in VS Code: onto a folder (or a file inside it) to move them there, onto the empty space
+  // below to move them to the top of the project. Onto a terminal, their text is pasted; onto an editor, they open.
+  // A row that is one of several selected takes the others along. Esc calls it off.
+  const [drag, setDrag] = useState<{ label: string; paths: string[]; x: number; y: number; dir: string | null } | null>(null);
+  const dragged = useRef(false); // a drag has just ended: the click that follows it is not a click
+  const listRef = useRef<HTMLDivElement>(null);
+  const startDrag = (ev: React.MouseEvent, e: Entry) => {
+    if (ev.button !== 0 || ev.shiftKey || ev.metaKey || ev.ctrlKey || renaming === e.path) return;
+    const from = { x: ev.clientX, y: ev.clientY };
+    const rows = visible();
+    const group = selected.includes(e.path) ? selected.filter((p) => rows.includes(p)) : [e.path];
+    const paths = group.filter((p) => !group.some((q) => p.startsWith(q + '/')));
+    const label = paths.length === 1 ? basename(paths[0]) : `${paths.length} items`;
+    let started = false;
+    let drop: { dir: string } | { pane: string } | null = null;
+    let lit: HTMLElement | null = null; // the pane outlined as the place they would land
+    let resting: { dir: string; timer: number } | null = null; // a closed folder the pointer has stopped on
+    let at = from;
+    let frame = 0;
+    const light = (el: HTMLElement | null) => { if (lit === el) return; lit?.classList.remove('is-file-drop'); lit = el; lit?.classList.add('is-file-drop'); };
+    // A closed folder opens when the pointer rests on it, so the rows can go further in.
+    const rest = (dir: string | null) => {
+      if ((resting?.dir ?? null) === dir) return;
+      if (resting) window.clearTimeout(resting.timer);
+      resting = dir && !openRef.current[dir] ? { dir, timer: window.setTimeout(() => { setOpen((o) => ({ ...o, [dir]: true })); load(dir); }, 600) } : null;
+    };
+    const aim = () => {
+      const el = document.elementFromPoint(at.x, at.y) as HTMLElement | null;
+      const row = el?.closest<HTMLElement>('.treerow[data-path]') ?? null;
+      const pane = row ? null : el?.closest<HTMLElement>('.pane[data-pane]') ?? null;
+      let dir = row ? (row.dataset.dir ? row.dataset.path! : dirname(row.dataset.path!)) : el?.closest('.tree-scroll') ? root : null;
+      rest(row?.dataset.dir ? row.dataset.path! : null);
+      // Nothing happens where the rows already are, and a folder cannot go inside itself.
+      if (dir != null && (paths.every((p) => dirname(p) === dir) || paths.some((p) => dir === p || dir!.startsWith(p + '/')))) dir = null;
+      drop = dir != null ? { dir } : pane ? { pane: pane.dataset.pane! } : null;
+      light(pane);
+      setDrag({ label, paths, x: at.x, y: at.y, dir });
+    };
+    // Held near the top or bottom of the list, it scrolls.
+    const scroll = () => {
+      frame = requestAnimationFrame(scroll);
+      const list = listRef.current;
+      if (!list) return;
+      const box = list.getBoundingClientRect();
+      if (at.x < box.left || at.x > box.right || at.y < box.top || at.y > box.bottom) return;
+      const by = at.y < box.top + 26 ? -8 : at.y > box.bottom - 26 ? 8 : 0;
+      const was = list.scrollTop;
+      if (by) list.scrollTop += by;
+      if (list.scrollTop !== was) aim();
+    };
+    const move = (m: MouseEvent) => {
+      at = { x: m.clientX, y: m.clientY };
+      if (!started) {
+        if (Math.hypot(at.x - from.x, at.y - from.y) < 5) return;
+        started = true;
+        document.body.classList.add('is-dragging-files');
+        frame = requestAnimationFrame(scroll);
+      }
+      aim();
+    };
+    const end = (place: boolean) => {
+      window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); window.removeEventListener('keydown', key, true);
+      cancelAnimationFrame(frame);
+      rest(null); light(null);
+      document.body.classList.remove('is-dragging-files');
+      setDrag(null);
+      if (!started) return;
+      dragged.current = true;
+      window.setTimeout(() => { dragged.current = false; });
+      if (!place || !drop) return;
+      if ('pane' in drop) { void dropEntries(paths, drop.pane, at); return; }
+      const { dir } = drop;
+      if (dir !== root) setOpen((o) => ({ ...o, [dir]: true }));
+      anchor.current = paths[0];
+      setSelected(paths); // they stay picked out where they land (`fs.renamed` below follows them there)
+      void moveEntries(paths, dir).then(() => load(dir));
+    };
+    const up = () => end(true);
+    const key = (k: KeyboardEvent) => { if (k.key === 'Escape') { k.preventDefault(); k.stopPropagation(); end(false); } };
+    window.addEventListener('mousemove', move); window.addEventListener('mouseup', up); window.addEventListener('keydown', key, true);
+  };
+
   const load = useCallback(async (dir: string) => {
     const list = (await api.fs.readDir(dir)) as Entry[];
     setChildren((c) => ({ ...c, [dir]: list }));
@@ -149,7 +235,8 @@ function FileTree({ views }: { views: Views }) {
     for (const [dir, isOpen] of Object.entries(openRef.current)) if (isOpen && dir.startsWith(root + '/')) load(dir);
   }, [root, load]);
 
-  useEffect(() => { setChildren({}); setSelected([]); anchor.current = null; load(root); }, [root]);
+  useEffect(() => { setChildren({}); setSelected([]); anchor.current = null; reload(); }, [root]);
+  useEffect(() => carry('tree', () => openRef.current), []);
   useEffect(() => bus.on('fs.changed', reload), [reload]);
   // A renamed folder stays expanded under its new name.
   useEffect(() => bus.on('fs.renamed', ({ from, to }: { from: string; to: string }) => {
@@ -159,6 +246,26 @@ function FileTree({ views }: { views: Views }) {
     if (anchor.current) anchor.current = move(anchor.current);
   }), []);
   useEffect(() => api.app.onFocus((on) => { if (on) reload(); }), [reload]);
+
+  // The open file is always on show: every folder above it opens (one closed by hand afterwards stays closed until
+  // another file comes to the front), and the list scrolls to its row once that is there.
+  const reveal = useRef<string | null>(null);
+  useEffect(() => {
+    if (!activeFile || !activeFile.startsWith(root + '/')) return;
+    const dirs: string[] = [];
+    for (let d = dirname(activeFile); d.length > root.length && d.startsWith(root + '/'); d = dirname(d)) dirs.unshift(d);
+    const shut = dirs.filter((d) => !openRef.current[d]);
+    if (shut.length) setOpen((o) => ({ ...o, ...Object.fromEntries(shut.map((d) => [d, true])) }));
+    for (const d of dirs) load(d);
+    reveal.current = activeFile;
+  }, [activeFile, root]);
+  useEffect(() => {
+    if (!reveal.current) return;
+    const row = document.querySelector<HTMLElement>('.tree-scroll .treerow.is-active');
+    if (!row) return;
+    reveal.current = null;
+    row.scrollIntoView({ block: 'nearest' });
+  }, [children, open, activeFile]);
 
   const toggle = (e: Entry) => {
     const next = !open[e.path];
@@ -178,10 +285,13 @@ function FileTree({ views }: { views: Views }) {
     const shown = showHidden ? list : list.filter((e) => !e.name.startsWith('.'));
     if (!shown.length && depth === 0 && !field) return <div className="side-note">This folder is empty.</div>;
     const rows = shown.map((e) => (
-      <div key={e.path}>
-        <div className={`treerow${e.path === activeFile ? ' is-active' : ''}${selected.includes(e.path) ? ' is-selected' : ''}`} style={{ paddingLeft: 10 + depth * 13 + (e.dir ? 0 : FILE_INSET) }} title={tildify(e.path)}
+      <div key={e.path} className={drag?.dir === e.path ? 'tree-node is-drop' : 'tree-node'}>
+        <div className={`treerow${e.path === activeFile ? ' is-active' : ''}${selected.includes(e.path) ? ' is-selected' : ''}${drag?.paths.includes(e.path) ? ' is-dragged' : ''}`} style={{ paddingLeft: 10 + depth * 13 + (e.dir ? 0 : FILE_INSET) }} title={drag ? undefined : tildify(e.path)}
+          data-path={e.path} data-dir={e.dir ? '1' : undefined}
+          onMouseDown={(ev) => startDrag(ev, e)}
           onContextMenu={(ev) => onMenu(ev, e)}
-          onClick={(ev) => { ev.stopPropagation(); onRowClick(ev, e); }}>
+          onClick={(ev) => { ev.stopPropagation(); onRowClick(ev, e); }}
+          onDoubleClick={() => { if (!e.dir && renaming !== e.path) useStore.getState().keepFile(e.path); }}>
           {e.dir ? <span className={`tree-arrow${open[e.path] ? ' is-open' : ''}`}><Icon name="chevron" size={12} /></span> : null}
           {renaming === e.path
             ? <RenameField initial={e.name} onDone={async (name) => { setRenaming(null); if (name && name !== e.name) await renameEntry(e.path, name); }} />
@@ -197,7 +307,8 @@ function FileTree({ views }: { views: Views }) {
       <div className="side-title">
         <span title={tildify(root)}>{basename(root)}</span>
       </div>
-      <div className="tree-scroll" onClick={() => setSelected([])}>{renderDir(root, 0)}</div>
+      <div className={`tree-scroll${drag?.dir === root ? ' is-drop' : ''}`} ref={listRef} onClick={() => { if (!dragged.current) setSelected([]); }}>{renderDir(root, 0)}</div>
+      {drag && createPortal(<div className="tree-drag" style={{ transform: `translate(${drag.x + 12}px, ${drag.y + 8}px)` }}>{drag.label}</div>, document.body)}
       <div className="side-foot">
         <SettingsButton />
         <button className={showHidden ? 'is-on' : ''} {...tip(showHidden ? 'Hide dotfiles' : 'Show dotfiles')} onClick={() => setShowHidden(!showHidden)}><Icon name="eye" size={16} /></button>
@@ -262,7 +373,7 @@ function SearchPanel({ views }: { views: Views }) {
       <div className="side-title"><span title={tildify(root)}>Search {basename(root)}</span></div>
       <div className="search-box">
         <input ref={inputRef} value={query} placeholder="Text to find" spellCheck={false} onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); const s = useStore.getState(); const t = s.tabs.find((x) => x.id === s.activeTab); if (t) focusPane(t.activePane); } }} />
+          onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); const id = focusedId(); if (id) focusPane(id); } }} />
         <button className={exact ? 'is-on' : ''} {...tip('Match case')} onClick={() => setExact(!exact)}>Aa</button>
         <button className={regex ? 'is-on' : ''} {...tip('Use a regular expression')} onClick={() => setRegex(!regex)}>.*</button>
       </div>
@@ -285,7 +396,7 @@ function SearchPanel({ views }: { views: Views }) {
               const start = Math.max(0, m.col - 1 - 24);
               const pre = m.text.slice(start, m.col - 1).trimStart();
               return (
-                <div key={i} className="hit-line" onClick={() => openFile(`${root}/${f.path}`, { line: m.line, col: m.col })}>
+                <div key={i} className="hit-line" onClick={() => openFile(`${root}/${f.path}`, { line: m.line, col: m.col })} onDoubleClick={() => useStore.getState().keepFile(`${root}/${f.path}`)}>
                   <span className="hit-no">{m.line}</span>
                   <span className="hit-text">{start > 0 && '…'}{pre}<mark>{m.text.slice(m.col - 1, m.col - 1 + m.len)}</mark>{m.text.slice(m.col - 1 + m.len, m.col - 1 + m.len + 120)}</span>
                 </div>

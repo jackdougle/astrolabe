@@ -10,7 +10,7 @@ export default async function ({ page, type, run, work, shot }) {
   await type('raw.md');
   await page.keyboard.press('Enter');
   await page.waitForTimeout(1500);
-  await page.keyboard.press('Meta+r');
+  await page.keyboard.press('Meta+Shift+r');
   await page.waitForTimeout(600);
   const text = () => page.evaluate(() => window.__monaco.editor.getModels().find((m) => m.uri.path.endsWith('raw.md'))?.getValue());
   const list = async () => JSON.stringify((await text()).split('\n').filter((l) => /^\s*\d/.test(l)));

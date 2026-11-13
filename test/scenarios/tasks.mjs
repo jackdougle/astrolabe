@@ -1,4 +1,4 @@
-// Tasks tick only from a click on the box itself or ⌘Enter on their line; an emptied heading leaves no line behind.
+// Tasks tick only from a click on the box itself or ⌘Enter on their line; an emptied heading loses a # per Backspace.
 import fs from 'node:fs';
 export default async function ({ page, run, type, work, shot }) {
   const dir = `${work}/notes`;
@@ -34,18 +34,19 @@ export default async function ({ page, run, type, work, shot }) {
   console.log('cmd+enter on a plain item:', await ticks(), '| items:', await page.evaluate(() => document.querySelectorAll('.rich li').length));
   await shot('tasks');
 
-  // Headings: no underline, and an emptied one is gone with one Backspace.
+  // Headings: no underline, and an emptied one loses a # per Backspace (h2, then h1, then an ordinary line).
   const blocks = () => page.evaluate(() => [...document.querySelector('.rich').children].map((e) => `${e.tagName}${e.textContent ? '' : '(empty)'}`).join(' '));
   console.log('h2 underline:', await page.evaluate(() => getComputedStyle(document.querySelector('.rich h2')).borderBottomWidth), '| rules:', await page.evaluate(() => document.querySelectorAll('.rich hr').length));
-  await page.click('.rich h2'); await page.waitForTimeout(250); await page.keyboard.press('Meta+ArrowRight'); await page.keyboard.press('Meta+Shift+ArrowLeft'); await page.keyboard.press('Backspace'); await page.waitForTimeout(250);
+  await page.click('.rich h2'); await page.waitForTimeout(250); await page.keyboard.press('Meta+ArrowRight'); for (let i = 0; i < 'Heading two'.length; i++) await page.keyboard.press('Backspace'); await page.waitForTimeout(250); // its words only: ⇧⌘← would take the #s too, as in the raw view
   console.log('heading text deleted:', await blocks()); await shot('tasks-heading');
   await page.keyboard.press('Backspace'); await page.waitForTimeout(250); console.log('one Backspace:', await blocks());
   await page.keyboard.press('Backspace'); await page.waitForTimeout(250); console.log('another Backspace:', await blocks());
+  await page.keyboard.press('Backspace'); await page.waitForTimeout(250); console.log('a third Backspace:', await blocks());
   await page.waitForTimeout(400); console.log('ticks before saving:', await ticks());
   await page.keyboard.press('Meta+s'); await page.waitForTimeout(500); console.log('file:', JSON.stringify(fs.readFileSync(`${dir}/todo.md`, 'utf8')));
 
   // Raw view: ⌘Enter ticks the task on the caret's line.
-  await page.keyboard.press('Meta+r'); await page.waitForTimeout(700);
+  await page.keyboard.press('Meta+Shift+r'); await page.waitForTimeout(700);
   await page.keyboard.press('Meta+ArrowUp'); await page.keyboard.press('ArrowDown'); await page.keyboard.press('ArrowDown'); await page.keyboard.press('Meta+ArrowRight');
   await page.keyboard.press('Meta+Enter'); await page.waitForTimeout(250); await page.keyboard.press('Meta+s'); await page.waitForTimeout(500);
   console.log('raw cmd+enter:', JSON.stringify(fs.readFileSync(`${dir}/todo.md`, 'utf8').split('\n').slice(0, 4)));

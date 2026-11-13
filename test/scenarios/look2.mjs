@@ -1,7 +1,7 @@
 export default async function ({ page, run, type, work }) {
   await run(`cd ${work}`);
   await page.keyboard.press('Meta+b'); await page.waitForTimeout(400);
-  await page.keyboard.press('Meta+p'); await page.waitForTimeout(400); await type('main'); await page.keyboard.press('Enter'); await page.waitForTimeout(1200);
+  await page.keyboard.press('Meta+p'); await page.waitForTimeout(400); await type('main.py'); await page.keyboard.press('Enter'); await page.waitForTimeout(1200);
   const read = () => page.evaluate(() => {
     const a = (el) => { const m = /\/ ([\d.]+)\)/.exec(getComputedStyle(el).backgroundColor); const c = getComputedStyle(el).backgroundColor; return /rgba\(0, 0, 0, 0\)|\/ 0\)/.test(c) ? 0 : m ? Number(m[1]) : 1; };
     const base = a(document.querySelector('.app'));

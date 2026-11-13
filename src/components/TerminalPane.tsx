@@ -3,7 +3,7 @@ import { api, tildify } from '../lib/api';
 import { pickAndAttach } from '../lib/commands';
 import { attachEmoji, contextValue, ensureHistory, ghostFor, history, loneColon, monaco, monoFont, overflowNode, registerInput } from '../lib/monaco';
 import { bus, paneHandles } from '../lib/panes';
-import { TermPane, termWeight, useStore } from '../lib/store';
+import { focusedId, TermPane, termWeight, useStore } from '../lib/store';
 import { TermSession } from '../lib/termSession';
 import { Icon } from './Icons';
 import { tip } from './Tooltip';
@@ -128,6 +128,9 @@ export function TerminalPane({ pane, active }: { pane: TermPane; active: boolean
 
     const focusInput = () => { editor.focus(); };
     session.wantInput = focusInput;
+    // A window reloaded in place keeps what was being typed.
+    session.inputText = () => model.getValue();
+    if (session.resumedInput) { setText(session.resumedInput); session.resumedInput = ''; }
     session.onEarlyInput = (text, enter) => {
       // Added at the cursor, so anything already in the input stays.
       if (text) editor.executeEdits('held', [{ range: editor.getSelection()!, text, forceMoveMarkers: true }]);
@@ -144,8 +147,7 @@ export function TerminalPane({ pane, active }: { pane: TermPane; active: boolean
     const offEvents = session.on((ev) => {
       if (ev !== 'prompt' && ev !== 'running') return;
       const st = useStore.getState();
-      const tab = st.tabs.find((t) => t.id === st.activeTab);
-      if (tab?.activePane === pane.id && !st.palette) requestAnimationFrame(focus);
+      if (focusedId(st) === pane.id && !st.palette) requestAnimationFrame(focus);
     });
     const offFind = bus.on('term.find', (id) => { if (id === pane.id) setFinding(true); });
     const offSet = bus.on('input.set', (arg: { pane: string; text: string }) => { if (arg.pane === pane.id) { setText(arg.text); focusInput(); } });

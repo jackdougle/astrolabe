@@ -2,6 +2,7 @@ import { ReactNode } from 'react';
 
 const P: Record<string, ReactNode> = {
   plus: <path d="M8 3.5v9M3.5 8h9" />,
+  graph: <><circle cx="4" cy="11.6" r="1.6" /><circle cx="12.2" cy="11" r="1.6" /><circle cx="8.4" cy="4.3" r="1.8" /><path d="M4.9 10.2l2.5-4.2M9.3 5.9l2.1 3.6M5.6 11.5l5-.4" /></>,
   x: <path d="M4.5 4.5l7 7M11.5 4.5l-7 7" />,
   tabs: <path d="M3 4.5h10M3 8h10M3 11.5h10" />,
   files: <><path d="M2.5 4.5a1 1 0 0 1 1-1h3l1.2 1.5h4.8a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1z" /></>,

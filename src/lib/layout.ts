@@ -43,6 +43,16 @@ export function removeLeaf(node: LayoutNode, pane: string): LayoutNode | null {
   return { ...node, a, b };
 }
 
+/** The tree with only the panes that pass `keep` (the rest give their space to their neighbours), or null when none do. */
+export function keepLeaves(node: LayoutNode, keep: (pane: string) => boolean): LayoutNode | null {
+  if (node.type === 'leaf') return keep(node.pane) ? node : null;
+  const a = keepLeaves(node.a, keep);
+  const b = keepLeaves(node.b, keep);
+  if (!a) return b;
+  if (!b) return a;
+  return a === node.a && b === node.b ? node : { ...node, a, b };
+}
+
 export function setRatio(node: LayoutNode, id: string, ratio: number): LayoutNode {
   if (node.type === 'leaf') return node;
   if (node.id === id) return { ...node, ratio };
@@ -65,23 +75,29 @@ export function leafShares(node: LayoutNode, fw = 1, fh = 1, out: { pane: string
 
 const holds = (node: LayoutNode, pane: string) => leaves(node).includes(pane);
 
-/** Puts `pane` on one side of the nearest left/right split around it ('toggle' swaps whichever side it is on). */
-export function placeSide(node: LayoutNode, pane: string, side: 'left' | 'right' | 'toggle'): { node: LayoutNode; done: boolean } {
-  if (node.type === 'leaf') return { node, done: false };
-  const a = placeSide(node.a, pane, side);
-  if (a.done) return { node: { ...node, a: a.node }, done: true };
-  const b = placeSide(node.b, pane, side);
-  if (b.done) return { node: { ...node, b: b.node }, done: true };
-  if (node.dir !== 'row' || !holds(node, pane)) return { node, done: false };
-  const onLeft = holds(node.a, pane);
-  const swap = side === 'toggle' || (side === 'left') !== onLeft;
-  return { node: swap ? { ...node, a: node.b, b: node.a, ratio: 1 - node.ratio } : node, done: true };
+export type Edge = 'left' | 'right' | 'top' | 'bottom';
+
+/** True when two trees arrange the same panes the same way, whatever their sizes. */
+function sameShape(a: LayoutNode, b: LayoutNode): boolean {
+  if (a.type === 'leaf' || b.type === 'leaf') return a.type === 'leaf' && b.type === 'leaf' && a.pane === b.pane;
+  return a.dir === b.dir && sameShape(a.a, b.a) && sameShape(a.b, b.b);
 }
 
-/** Which side of the nearest left/right split around it `pane` is on, if any. */
-export function sideOf(node: LayoutNode, pane: string): 'left' | 'right' | null {
-  if (node.type === 'leaf') return null;
-  const inner = sideOf(node.a, pane) ?? sideOf(node.b, pane);
-  if (inner || node.dir !== 'row' || !holds(node, pane)) return inner;
-  return holds(node.a, pane) ? 'left' : 'right';
+/** Puts a pane that is not in the tree yet against one edge of `target`, sharing its space half and half
+ *  (against that edge of the whole tree when `target` is null). */
+export function addLeaf(root: LayoutNode, pane: string, target: string | null, edge: Edge, id: string): LayoutNode {
+  const added: LayoutNode = { type: 'leaf', pane };
+  const first = edge === 'left' || edge === 'top';
+  const beside = (n: LayoutNode): LayoutNode => ({ type: 'split', id, dir: edge === 'left' || edge === 'right' ? 'row' : 'col', ratio: 0.5, a: first ? added : n, b: first ? n : added });
+  return target ? replaceLeaf(root, target, beside) : beside(root);
+}
+
+/** Takes `pane` out of the tree and puts it against one edge of `target` (see `addLeaf`).
+ *  Returns the tree it was given when nothing would move. */
+export function moveLeaf(root: LayoutNode, pane: string, target: string | null, edge: Edge, id: string): LayoutNode {
+  if (pane === target || !holds(root, pane)) return root;
+  const rest = removeLeaf(root, pane);
+  if (!rest || (target && !holds(rest, target))) return root;
+  const next = addLeaf(rest, pane, target, edge, id);
+  return sameShape(next, root) ? root : next;
 }
