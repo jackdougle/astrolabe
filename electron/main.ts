@@ -1,6 +1,7 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, net, shell, clipboard, systemPreferences, WebContents } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, net, screen, session, shell, clipboard, systemPreferences, WebContents } from 'electron';
 import * as pty from 'node-pty';
 import { spawn, execFile, ChildProcess } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
@@ -55,7 +56,7 @@ const userPathReady = new Promise<void>((resolve) => {
 });
 
 // ---------- updating from source ----------
-// An installed copy knows the folder it was built from. ⌘R brings it up to date with that
+// An installed copy knows the folder it was built from. The update notice's button brings it up to date with that
 // folder, doing no more than the change calls for:
 //   the interface (src/)            built straight into this copy in about a second; every window then reloads
 //                                   where it stands, with its shells still running
@@ -225,6 +226,9 @@ interface Session {
   /** It ended while held; the new page is told when it takes over. */
   exit: number | null;
 }
+/** A secret each shell is started with and puts on the marks it sends the page (electron/shell.ts), so that
+ *  nothing a program prints can pass for one of them. */
+const newNonce = () => crypto.randomBytes(16).toString('hex');
 const sessions = new Map<string, Session>();
 function flushSession(id: string, s: Session) {
   if (s.timer) { clearTimeout(s.timer); s.timer = null; }
@@ -234,20 +238,13 @@ function flushSession(id: string, s: Session) {
 }
 let integrationDir: string | null = null;
 
-const noteDate = (d = new Date()) => `${String(d.getMonth() + 1).padStart(2, '0')}.${String(d.getDate()).padStart(2, '0')}.${d.getFullYear()}`;
-let lastAddress: { text: string; at: number } | null = null;
-/** House number and street from CoreLocationCLI (brew install corelocationcli), as the Obsidian note script does.
- *  Falls back to the last street found in the past hour, then to "???" to fill in by hand. */
-function streetAddress(): Promise<string> {
-  const fallback = () => (lastAddress && Date.now() - lastAddress.at < 3600_000 ? lastAddress.text : '???');
-  const cli = ['/opt/homebrew/bin/CoreLocationCLI', '/usr/local/bin/CoreLocationCLI'].find((p) => fs.existsSync(p));
-  if (!cli) return Promise.resolve(fallback());
-  return new Promise((resolve) => {
-    execFile(cli, ['--format', '%subThoroughfare %thoroughfare'], { timeout: 6000 }, (_err, stdout) => {
-      const line = String(stdout ?? '').split('\n')[0].trim();
-      // Exit codes are unreliable: a street has letters and is not an error message.
-      if (/[A-Za-z]/.test(line) && !/\b(error|denied|nil|null|unknown)\b/i.test(line)) { lastAddress = { text: line, at: Date.now() }; resolve(line); }
-      else resolve(fallback());
+/** Runs a command that a setting names (`noteTemplate`, `onFileClose`), with `arg` as its last argument, and gives
+ *  back what it printed. Nothing of the kind runs unless the setting is filled in. */
+async function runUserCommand(command: string, arg: string, timeout: number) {
+  await userPathReady;
+  return new Promise<{ out: string; error?: string }>((resolve) => {
+    execFile('/bin/sh', ['-c', `${command} "$0"`, arg], { timeout, maxBuffer: 1024 * 1024, env: { ...process.env, PATH: userPath } }, (err, stdout, stderr) => {
+      resolve(err ? { out: '', error: (String(stderr ?? '').trim() || err.message).slice(0, 300) } : { out: String(stdout ?? '') });
     });
   });
 }
@@ -259,12 +256,13 @@ function spawnSession(wc: WebContents, id: string, opts: { cwd?: string; cols: n
   // A page that starts a shell under an id already in use has no further use for the old one.
   const old = sessions.get(id);
   if (old) { sessions.delete(id); try { old.proc.kill(); } catch {} }
+  const nonce = newNonce();
   const proc = pty.spawn(USER_SHELL, ['-l'], {
     name: 'xterm-256color',
     cols: Math.max(2, opts.cols),
     rows: Math.max(2, opts.rows),
     cwd,
-    env: shellEnv(USER_SHELL, isZsh ? integrationDir : null, opts.prompt ?? 'native') as { [k: string]: string },
+    env: shellEnv(USER_SHELL, isZsh ? integrationDir : null, opts.prompt ?? 'native', nonce) as { [k: string]: string },
   });
   const s: Session = { proc, wc, buf: '', timer: null, held: false, since: null, cut: 0, exit: null };
   sessions.set(id, s);
@@ -282,7 +280,7 @@ function spawnSession(wc: WebContents, id: string, opts: { cwd?: string; cols: n
     sessions.delete(id);
     if (!s.wc.isDestroyed()) s.wc.send('pty:exit', id, exitCode);
   });
-  return { integrated: isZsh && !!integrationDir, shell: USER_SHELL };
+  return { integrated: isZsh && !!integrationDir, shell: USER_SHELL, nonce };
 }
 
 /** The page that replaced a reloaded one takes a shell back, along with what it printed in between. */
@@ -309,14 +307,14 @@ const bootWaiters = new Map<number, (up: boolean) => void>();
 const reloading = new Set<number>();
 let prepareSeq = 0;
 
-function askPage(wc: WebContents, ms: number) {
+function askPage(wc: WebContents, ms: number, channel = 'app:prepareReload', arg?: unknown) {
   return new Promise<Record<string, unknown> | null>((resolve) => {
     const token = ++prepareSeq;
     const done = (data: Record<string, unknown> | null) => { clearTimeout(timer); ipcMain.removeListener('app:handoff', heard); resolve(data); };
     const heard = (e: Electron.IpcMainEvent, t: number, data: Record<string, unknown> | null) => { if (e.sender === wc && t === token) done(data ?? null); };
     const timer = setTimeout(() => done(null), ms);
     ipcMain.on('app:handoff', heard);
-    wc.send('app:prepareReload', token);
+    wc.send(channel, token, arg);
   });
 }
 
@@ -362,6 +360,188 @@ function pageBooted(wc: WebContents) {
 
 function killSessionsFor(wc: WebContents) {
   for (const [id, s] of sessions) if (s.wc === wc) { try { s.proc.kill(); } catch {} sessions.delete(id); }
+}
+
+// ---------- tabs taken out of a window ----------
+// A tab dragged past the edge of its window and let go there becomes a window of its own, where it was let go
+// (src/lib/tearoff.ts). The new window's page starts from a handoff, as a page reloaded in place does, so a
+// terminal arrives with its screen and with its shell, which never stops. While the tab is outside, an outline
+// follows the pointer to show where that window will be.
+
+interface TearSpec {
+  /** The pointer, in the page's own px. */
+  at: { x: number; y: number };
+  /** Where the pointer will be in the window to come, measured from that window's corner. */
+  grab: { x: number; y: number };
+  /** The tab as it will sit in that window, and what it says. */
+  tab: { x: number; y: number; w: number; h: number }; label: string;
+  /** The page's colours, for the outline. */
+  accent: string; surface: string; text: string;
+  /** The tab is all its window holds, so the window itself goes there. */
+  lone: boolean;
+  /** The terminals that go with it. */
+  terms: string[];
+  /** What the page is asked to hand over. */
+  what: unknown;
+}
+
+function tearBounds(win: BrowserWindow, spec: TearSpec): Electron.Rectangle {
+  const z = win.webContents.getZoomFactor();
+  const content = win.getContentBounds();
+  const size = win.isFullScreen() || win.isMaximized() ? win.getNormalBounds() : win.getBounds();
+  const pt = { x: content.x + spec.at.x * z, y: content.y + spec.at.y * z };
+  // Never under the menu bar: the system would move a real window down from there, and the outline should not lie.
+  const area = screen.getDisplayNearestPoint({ x: Math.round(pt.x), y: Math.round(pt.y) }).workArea;
+  return { x: Math.round(pt.x - spec.grab.x * z), y: Math.max(area.y, Math.round(pt.y - spec.grab.y * z)), width: size.width, height: size.height };
+}
+
+const ghosts = new Map<number, BrowserWindow>();
+const cssColor = (c: unknown, fallback: string) => (typeof c === 'string' && /^[#\w(),.%\s/-]{1,80}$/.test(c) ? c : fallback);
+const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+/** Takes away the outline shown for a window's dragged tab. `id` is the window's page's. */
+function dropGhost(id: number) {
+  const ghost = ghosts.get(id);
+  ghosts.delete(id);
+  if (ghost && !ghost.isDestroyed()) ghost.destroy();
+}
+
+/** Shows the outline of the window a dragged tab would become. */
+function showGhost(win: BrowserWindow, spec: TearSpec) {
+  const id = win.webContents.id;
+  let ghost = ghosts.get(id);
+  const bounds = tearBounds(win, spec);
+  if (ghost && !ghost.isDestroyed()) { ghost.setBounds(bounds); return; }
+  ghost = new BrowserWindow({
+    ...bounds, frame: false, transparent: true, hasShadow: false, focusable: false, resizable: false, alwaysOnTop: true, skipTaskbar: true, show: false,
+    webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
+  });
+  ghost.setIgnoreMouseEvents(true);
+  ghosts.set(id, ghost);
+  const z = win.webContents.getZoomFactor();
+  const accent = cssColor(spec.accent, '#4DA6FF');
+  const num = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  const t = { x: num(spec.tab?.x), y: num(spec.tab?.y), w: num(spec.tab?.w), h: num(spec.tab?.h) };
+  const html = `<!doctype html><meta charset="utf-8"><body style="margin:0;overflow:hidden;background:transparent">`
+    + `<div style="position:fixed;inset:0;box-sizing:border-box;border:1.5px solid ${accent};border-radius:10px;background:color-mix(in srgb, ${accent} 12%, transparent)"></div>`
+    + `<div style="position:fixed;left:${t.x * z}px;top:${t.y * z}px;width:${t.w * z}px;height:${t.h * z}px;box-sizing:border-box;padding:0 ${9 * z}px;border-radius:7px;`
+    + `background:${cssColor(spec.surface, '#16202E')};color:${cssColor(spec.text, '#E6EDF5')};box-shadow:inset 0 0 0 1px ${accent};font:${11.5 * z}px ui-monospace,'SF Mono',Menlo,monospace;`
+    + `line-height:${t.h * z}px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(String(spec.label ?? ''))}</div></body>`;
+  const mine = ghost;
+  ghost.once('ready-to-show', () => { if (!mine.isDestroyed() && ghosts.get(id) === mine) mine.showInactive(); });
+  void ghost.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`).catch(() => {});
+}
+
+/** The shells that go with a dragged tab, held from here on: what they have printed reaches the old page before
+ *  it describes them, and what they print next waits for the page that takes them. */
+function holdShells(wc: WebContents, spec: TearSpec) {
+  const mine = (Array.isArray(spec.terms) ? spec.terms : []).map((id) => [id, sessions.get(id)] as const).filter((x): x is readonly [string, Session] => !!x[1] && x[1].wc === wc);
+  for (const [id, s] of mine) { flushSession(id, s); s.held = true; if (s.since === null) s.since = ''; s.cut = s.since.length; }
+  return mine;
+}
+/** The page kept its tab after all, so its shells carry on where they are. */
+function releaseShells(wc: WebContents, mine: (readonly [string, Session])[]) {
+  for (const [id, s] of mine) {
+    if (sessions.get(id) !== s) continue;
+    s.held = false;
+    const missed = (s.since ?? '').slice(s.cut);
+    s.since = null;
+    if (wc.isDestroyed()) continue;
+    if (missed) wc.send('pty:data', id, missed);
+    if (s.exit !== null) { sessions.delete(id); wc.send('pty:exit', id, s.exit); }
+  }
+}
+
+/** The tab was let go outside its window: it gets a window of its own there. */
+async function tearOff(win: BrowserWindow, spec: TearSpec) {
+  const wc = win.webContents;
+  const page = wc.id;
+  const bounds = tearBounds(win, spec);
+  if (spec.lone) {
+    // Nothing would be left behind, so the window goes there as it is.
+    if (!win.isFullScreen()) win.setBounds(bounds, animateWindows());
+    dropGhost(page);
+    return;
+  }
+  const mine = holdShells(wc, spec);
+  const data = await askPage(wc, 5000, 'app:prepareMove', spec.what);
+  if (!data || win.isDestroyed()) { dropGhost(page); releaseShells(wc, mine); return; }
+  // The outline stays until the window that takes its place can be seen.
+  const next = createWindow({ bounds, handoff: data, shown: () => setTimeout(() => dropGhost(page), animateWindows() ? 200 : 0) });
+  for (const [, s] of mine) { s.since = (s.since ?? '').slice(s.cut); s.wc = next.webContents; }
+}
+
+// ---------- tabs dragged into another window ----------
+// A tab dragged out of its window and over another one joins that window where it is let go, instead of getting
+// a window of its own. While it is over the window, that window's page shows where it would land (movein.ts);
+// let go, the page it came from hands it over exactly as for a new window, and the other page takes it in, shells
+// and all. A tab that was all its window held leaves that window to close.
+
+/** The app's windows, the one used last first: which of two that overlap is on top. */
+const stacked: BrowserWindow[] = [];
+app.on('browser-window-focus', (_e, win) => { const i = stacked.indexOf(win); if (i >= 0) stacked.splice(i, 1); stacked.unshift(win); });
+app.on('browser-window-created', (_e, win) => { win.once('closed', () => { const i = stacked.indexOf(win); if (i >= 0) stacked.splice(i, 1); }); });
+
+/** The window a tab dragged out of `from` is over, and where over it, in that window's page's own px. */
+function windowUnder(from: BrowserWindow, spec: TearSpec): { win: BrowserWindow; x: number; y: number } | null {
+  const z = from.webContents.getZoomFactor();
+  const content = from.getContentBounds();
+  const pt = { x: content.x + Number(spec.at?.x) * z, y: content.y + Number(spec.at?.y) * z };
+  if (!Number.isFinite(pt.x) || !Number.isFinite(pt.y)) return null;
+  const outlines = new Set(ghosts.values());
+  const rank = (w: BrowserWindow) => { const i = stacked.indexOf(w); return i < 0 ? stacked.length : i; };
+  const over = BrowserWindow.getAllWindows()
+    .filter((w) => w !== from && !w.isDestroyed() && !outlines.has(w) && w.isVisible() && !w.isMinimized() && !fadingOut.has(w))
+    .filter((w) => { const b = w.getContentBounds(); return pt.x >= b.x && pt.x < b.x + b.width && pt.y >= b.y && pt.y < b.y + b.height; })
+    .sort((a, b) => rank(a) - rank(b))[0];
+  if (!over) return null;
+  const b = over.getContentBounds();
+  const oz = over.webContents.getZoomFactor() || 1;
+  return { win: over, x: (pt.x - b.x) / oz, y: (pt.y - b.y) / oz };
+}
+
+/** For each page with a tab dragged out of it: the window that tab is over. */
+const hovered = new Map<number, BrowserWindow>();
+function leaveHover(page: number) {
+  const was = hovered.get(page);
+  hovered.delete(page);
+  if (was && !was.isDestroyed()) was.webContents.send('tear:hover', null);
+}
+const tornKind = (spec: TearSpec) => ((spec.what as { kind?: unknown } | null)?.kind === 'file' ? 'file' : 'tab');
+
+/** A dragged tab has moved, outside its window: over another window, that one shows where it would land;
+ *  anywhere else, the outline of the window it would become follows it. */
+function tearOver(win: BrowserWindow, spec: TearSpec) {
+  const page = win.webContents.id;
+  const under = windowUnder(win, spec);
+  if (!under) { leaveHover(page); showGhost(win, spec); return; }
+  dropGhost(page);
+  if (hovered.get(page) !== under.win) { leaveHover(page); hovered.set(page, under.win); }
+  under.win.webContents.send('tear:hover', { x: under.x, y: under.y, kind: tornKind(spec), label: String(spec.label ?? '').slice(0, 200) });
+}
+
+/** The tab was let go over another window: it joins that window. */
+async function moveInto(win: BrowserWindow, to: { win: BrowserWindow; x: number; y: number }, spec: TearSpec) {
+  const wc = win.webContents;
+  const mine = holdShells(wc, spec);
+  // `into`: the page lets go of its tab even when it is all the window holds, and then closes.
+  const what = spec.what && typeof spec.what === 'object' ? { ...(spec.what as object), into: true } : spec.what;
+  const data = await askPage(wc, 5000, 'app:prepareMove', what);
+  if (!data) { releaseShells(wc, mine); return; }
+  // From here the page has let its tab go. Its shells answer to the window that takes it, before the old page's
+  // closing terminals can end them.
+  const point = (next: WebContents) => { for (const [, s] of mine) s.wc = next; };
+  for (const [, s] of mine) s.since = (s.since ?? '').slice(s.cut);
+  const taken = !to.win.isDestroyed() && (point(to.win.webContents), !!(await askPage(to.win.webContents, 5000, 'app:adopt', { data, at: { x: to.x, y: to.y } })));
+  if (taken) {
+    if (process.env.ASTROLABE_TEST !== 'background') to.win.focus();
+    return;
+  }
+  // The window could not take it: it gets a window of its own after all, where it was let go.
+  const from = win.isDestroyed() ? (to.win.isDestroyed() ? null : to.win) : win;
+  const bounds = from ? tearBounds(from, win.isDestroyed() ? { ...spec, at: { x: to.x, y: to.y } } : spec) : undefined;
+  const next = bounds ? createWindow({ bounds, handoff: data }) : null;
+  if (next) point(next.webContents); else for (const [id, s] of mine) { if (sessions.get(id) === s) { sessions.delete(id); try { s.proc.kill(); } catch {} } }
 }
 
 // ---------- files ----------
@@ -463,7 +643,9 @@ async function gitInfo(cwd: string) {
   const out = await run('git', ['-C', cwd, 'rev-parse', '--show-toplevel', '--abbrev-ref', 'HEAD'], { timeout: 1500 });
   const [root, branch] = out.trim().split('\n');
   if (!root || !branch) return null;
-  const status = await run('git', ['-C', cwd, 'status', '--porcelain', '--untracked-files=no'], { timeout: 1500 });
+  // A folder's own git settings can name a program for `status` to run (core.fsmonitor); being in a folder is not
+  // a reason to run it.
+  const status = await run('git', ['-C', cwd, '-c', 'core.fsmonitor=false', 'status', '--porcelain', '--untracked-files=no'], { timeout: 1500 });
   return { root, branch, dirty: status.split('\n').filter(Boolean).length };
 }
 
@@ -532,6 +714,8 @@ async function searchProject(wc: WebContents, opts: { root: string; query: strin
 
 // Windows fade in when they open and out when they close, unless macOS is set to reduce motion or the app is quitting.
 let quitting = false;
+/** The pages of windows opened beside another one: they start empty instead of reopening the last session. */
+const fresh = new Set<number>();
 const fadingOut = new WeakSet<BrowserWindow>();
 const animateWindows = () => !quitting && !systemPreferences.getAnimationSettings().prefersReducedMotion;
 function fadeWindow(win: BrowserWindow, to: number, ms: number, done?: () => void) {
@@ -547,13 +731,15 @@ function fadeWindow(win: BrowserWindow, to: number, ms: number, done?: () => voi
   step();
 }
 
-function createWindow() {
+/** `from`: the window is for a tab taken out of another one. It opens there, and its page starts from that handoff. */
+function createWindow(from?: { bounds: Electron.Rectangle; handoff: Record<string, unknown>; shown?: () => void }) {
   const state = readJson<{ bounds?: Electron.Rectangle }>(STATE_FILE, {});
+  const first = !from && !BrowserWindow.getAllWindows().length;
   const win = new BrowserWindow({
-    width: state.bounds?.width ?? 1360,
-    height: state.bounds?.height ?? 860,
-    x: BrowserWindow.getAllWindows().length ? undefined : state.bounds?.x,
-    y: BrowserWindow.getAllWindows().length ? undefined : state.bounds?.y,
+    width: from?.bounds.width ?? state.bounds?.width ?? 1360,
+    height: from?.bounds.height ?? state.bounds?.height ?? 860,
+    x: from ? from.bounds.x : first ? state.bounds?.x : undefined,
+    y: from ? from.bounds.y : first ? state.bounds?.y : undefined,
     minWidth: 240,
     minHeight: 72,
     titleBarStyle: 'hiddenInset',
@@ -567,16 +753,22 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
+      webviewTag: false,
       spellcheck: false,
     },
   });
   const wc = win.webContents;
+  if (from) handoffs.set(wc.id, from.handoff);
+  // Only the first window reopens the last session. A second one that did would start its shells under the
+  // first one's names, which ends the first one's.
+  if (!first) fresh.add(wc.id);
   win.once('ready-to-show', () => {
     const animate = animateWindows();
     if (animate) win.setOpacity(0);
     if (process.env.ASTROLABE_TEST === 'background') win.showInactive(); else win.show();
     if (animate) fadeWindow(win, 1, 190);
+    from?.shown?.();
   });
   win.on('close', (ev) => {
     if (!fadingOut.has(win)) {
@@ -591,6 +783,9 @@ function createWindow() {
       if (animateWindows() && win.isVisible() && !win.isFullScreen()) { ev.preventDefault(); fadeWindow(win, 0, 150, () => win.close()); return; }
     }
     unsaved.delete(wc.id);
+    fresh.delete(wc.id);
+    dropGhost(wc.id);
+    leaveHover(wc.id);
     handoffs.delete(wc.id);
     shots.delete(wc.id);
     const s = readJson<Record<string, unknown>>(STATE_FILE, {});
@@ -600,7 +795,12 @@ function createWindow() {
   win.on('enter-full-screen', () => wc.send('win:fullscreen', true));
   win.on('leave-full-screen', () => wc.send('win:fullscreen', false));
   wc.setWindowOpenHandler(({ url }) => { if (/^https?:/.test(url)) shell.openExternal(url); return { action: 'deny' }; });
-  wc.on('will-navigate', (e, url) => { if (!url.startsWith('astrolabe://') && !url.startsWith(process.env.ASTROLABE_DEV_URL || '\0')) { e.preventDefault(); if (/^https?:/.test(url)) shell.openExternal(url); } });
+  // The window only ever shows the app's own page. Anything else it is sent to (a link, a dropped file, a file
+  // served through `__file`) would otherwise load with the preload script, and so with the app's reach.
+  const stay = (e: Electron.Event, url: string) => { if (!isAppPage(url)) { e.preventDefault(); if (/^https?:/.test(url)) shell.openExternal(url); } };
+  wc.on('will-navigate', stay);
+  wc.on('will-redirect', stay);
+  wc.on('will-attach-webview', (e) => e.preventDefault());
   if (process.env.ASTROLABE_DEV_URL) win.loadURL(process.env.ASTROLABE_DEV_URL);
   else win.loadURL('astrolabe://app/index.html');
   return win;
@@ -710,20 +910,53 @@ app.on('open-file', (e, file) => {
 
 // ---------- ipc ----------
 
+const DEV_URL = process.env.ASTROLABE_DEV_URL || '';
+/** The app's own page: the one address its windows are meant to show. */
+function isAppPage(url: string) {
+  try {
+    const u = new URL(url);
+    if (DEV_URL) { const d = new URL(DEV_URL); if (u.protocol === d.protocol && u.host === d.host) return true; }
+    return u.protocol === 'astrolabe:' && u.host === 'app' && (u.pathname === '/' || u.pathname === '/index.html');
+  } catch { return false; }
+}
+/** Messages are taken only from the top frame of a window showing the app's own page. */
+function trusted(e: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent) {
+  const frame = e.senderFrame;
+  return !!frame && !frame.parent && isAppPage(frame.url);
+}
+const guarded = {
+  handle: (channel: string, fn: (e: Electron.IpcMainInvokeEvent, ...args: any[]) => unknown) =>
+    ipcMain.handle(channel, (e, ...args) => { if (!trusted(e)) throw new Error('Not allowed'); return fn(e, ...args); }),
+  on: (channel: string, fn: (e: Electron.IpcMainEvent, ...args: any[]) => void) =>
+    ipcMain.on(channel, (e, ...args) => { if (trusted(e)) fn(e, ...args); else if (channel === 'app:shot') e.returnValue = 0; }),
+};
+
 function registerIpc() {
+  const ipcMain = guarded; // every handler below goes through the check above
   ipcMain.handle('pty:spawn', (e, id: string, opts) => spawnSession(e.sender, id, opts));
-  ipcMain.on('pty:write', (_e, id: string, data: string) => { sessions.get(id)?.proc.write(data); });
-  ipcMain.on('pty:resize', (_e, id: string, cols: number, rows: number) => {
-    try { sessions.get(id)?.proc.resize(Math.max(2, cols), Math.max(2, rows)); } catch {}
+  // A shell answers only to the page it belongs to: one whose tab has gone to another window has no more say in it.
+  const own = (e: Electron.IpcMainEvent, id: string) => { const s = sessions.get(id); return s && s.wc === e.sender ? s : null; };
+  ipcMain.on('pty:write', (e, id: string, data: string) => { own(e, id)?.proc.write(data); });
+  ipcMain.on('pty:resize', (e, id: string, cols: number, rows: number) => {
+    try { own(e, id)?.proc.resize(Math.max(2, cols), Math.max(2, rows)); } catch {}
   });
-  ipcMain.handle('pty:attach', (e, id: string) => attachSession(e.sender, id));
-  ipcMain.on('pty:kill', (_e, id: string) => { const s = sessions.get(id); if (s) { try { s.proc.kill(); } catch {} sessions.delete(id); } });
+  ipcMain.handle('pty:attach', (e, id: string) => {
+    const ok = attachSession(e.sender, id);
+    // A page already up (it took the terminal in from another window) will not report that it has booted, which is
+    // what ends the keeping of output for a page that is still starting.
+    const s = sessions.get(id);
+    if (ok && s && !reloading.has(e.sender.id) && !handoffs.has(e.sender.id)) s.since = null;
+    return ok;
+  });
+  ipcMain.on('pty:kill', (e, id: string) => { const s = own(e, id); if (s) { try { s.proc.kill(); } catch {} sessions.delete(id); } });
 
   ipcMain.handle('fs:readDir', (_e, dir: string) => readDir(dir).catch(() => []));
   ipcMain.handle('fs:readFile', async (_e, file: string) => {
     try {
       const st = await fsp.stat(file);
       if (st.isDirectory()) return { error: 'That is a folder, not a file.' };
+      // A device or a pipe has no end to read to (/dev/zero would fill memory until the app died).
+      if (!st.isFile()) return { error: 'This is not an ordinary file, so it is not opened.' };
       if (st.size > 8 * 1024 * 1024) return { error: `This file is ${(st.size / 1048576).toFixed(1)} MB, which is too large to open here.` };
       const buf = await fsp.readFile(file);
       if (buf.subarray(0, 8000).includes(0)) return { error: 'This looks like a binary file, so it is not shown as text.' };
@@ -830,12 +1063,14 @@ function registerIpc() {
     const res = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts);
     return res.canceled ? [] : res.filePaths;
   });
-  ipcMain.handle('fs:newNote', async (_e, dir: string, stamped?: boolean) => {
-    // A stamped note starts like his Obsidian notes: "*11.11.2026 - 2520 Milvia St*", then a blank line.
-    const text = stamped ? `*${noteDate()} - ${await streetAddress()}*\n\n` : '';
+  ipcMain.handle('fs:newNote', async (_e, dir: string, template?: string) => {
+    // A note starts with whatever the command the `noteTemplate` setting names prints (it is given the note's folder
+    // as its last argument). With no command, or one that fails, the note starts empty.
+    const made = template ? await runUserCommand(template, dir, 10000) : null;
+    const text = made?.out ?? '';
     for (let i = 1; i < 500; i++) {
       const file = path.join(dir, i === 1 ? 'Untitled.md' : `Untitled ${i}.md`);
-      try { await fsp.writeFile(file, text, { flag: 'wx' }); return { path: file, text }; }
+      try { await fsp.writeFile(file, text, { flag: 'wx' }); return { path: file, text, warning: made?.error }; }
       catch (err: any) { if (err?.code !== 'EEXIST') return { error: String(err?.message ?? err) }; }
     }
     return { error: 'Too many untitled notes in this folder.' };
@@ -882,6 +1117,8 @@ function registerIpc() {
   // Uploading is whatever command the `imageUpload` setting names: it is given the picture's path as its last
   // argument and prints the web address the picture can then be seen at. Nothing is sent anywhere unless that is set.
   ipcMain.handle('fs:uploadImage', async (_e, command: string, file: string) => {
+    // What a note calls a picture is whatever path it names; only a picture is ever sent out.
+    if (!PICTURE.test(String(file)) || !(await fsp.stat(file).then((st) => st.isFile(), () => false))) return { error: 'not a picture file' };
     await userPathReady;
     return new Promise<{ url?: string; error?: string }>((resolve) => {
       execFile('/bin/sh', ['-c', `${command} "$0"`, file], { timeout: 120000, maxBuffer: 1024 * 1024, env: { ...process.env, PATH: userPath } }, (err, stdout, stderr) => {
@@ -889,6 +1126,12 @@ function registerIpc() {
         resolve(!err && url ? { url } : { error: (String(stderr ?? '').trim() || err?.message || 'the command printed no web address').slice(0, 300) });
       });
     });
+  });
+  // What happens when a file's last tab closes is up to the command the `onFileClose` setting names: it is given the
+  // file's path as its last argument, and the last line it prints, if any, is shown as a message.
+  ipcMain.handle('fs:fileClosed', async (_e, command: string, file: string) => {
+    const res = await runUserCommand(command, file, 120000);
+    return res.error ? { error: res.error } : { said: res.out.split('\n').map((line) => line.trim()).filter(Boolean).pop() };
   });
   // A ⌘N note closed with nothing added is deleted. `text` is what it was made with; a file holding anything else is left alone.
   ipcMain.handle('fs:discardBlank', async (_e, file: string, text: string) => {
@@ -905,12 +1148,37 @@ function registerIpc() {
   ipcMain.handle('app:info', () => ({ home: os.homedir(), shell: USER_SHELL, platform: process.platform, settingsFile: SETTINGS_FILE, version: app.getVersion() }));
   ipcMain.handle('settings:load', () => readJson<Record<string, unknown>>(SETTINGS_FILE, {}));
   ipcMain.handle('settings:save', (_e, data) => { writeJson(SETTINGS_FILE, data); return true; });
-  ipcMain.handle('state:load', () => readJson<Record<string, unknown>>(STATE_FILE, {}));
+  ipcMain.handle('state:load', (e) => { const state = readJson<Record<string, unknown>>(STATE_FILE, {}); return fresh.has(e.sender.id) ? { ...state, session: null } : state; });
   ipcMain.handle('state:save', (_e, data) => { writeJson(STATE_FILE, { ...readJson<Record<string, unknown>>(STATE_FILE, {}), ...data }); return true; });
   ipcMain.on('app:zoom', (e, factor: number) => { e.sender.setZoomFactor(Math.min(2, Math.max(0.5, factor))); });
   ipcMain.on('app:openExternal', (_e, url: string) => { if (/^(https?|mailto):/.test(url)) shell.openExternal(url); });
   ipcMain.on('app:reveal', (_e, file: string) => shell.showItemInFolder(file));
   ipcMain.on('app:newWindow', () => createWindow());
+  ipcMain.on('tear:over', (e, spec: TearSpec | null) => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    if (win && spec) tearOver(win, spec); else { leaveHover(e.sender.id); dropGhost(e.sender.id); }
+  });
+  ipcMain.on('tear:drop', (e, spec: TearSpec | null) => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    const page = e.sender.id;
+    const under = win && spec ? windowUnder(win, spec) : null;
+    leaveHover(page);
+    if (win && spec && under) { dropGhost(page); void moveInto(win, under, spec).catch(() => {}); }
+    else if (win && spec) void tearOff(win, spec).catch(() => dropGhost(page));
+    else dropGhost(page);
+  });
+  // Right-clicking a terminal tab.
+  ipcMain.handle('tab:menu', (e, opts: { join?: boolean; part?: boolean }) => new Promise<string | null>((resolve) => {
+    if (process.env.ASTROLABE_TEST) { resolve(testMenuChoice); testMenuChoice = null; return; }
+    const win = BrowserWindow.fromWebContents(e.sender);
+    const menu = Menu.buildFromTemplate([
+      { label: 'Combine with Current Tab', enabled: !!opts?.join, click: () => resolve('join') },
+      { label: 'Move Terminal to Its Own Tab', enabled: !!opts?.part, click: () => resolve('part') },
+      { type: 'separator' as const },
+      { label: 'Close Tab', click: () => resolve('close') },
+    ]);
+    menu.popup({ window: win ?? undefined, callback: () => setTimeout(() => resolve(null), 50) });
+  }));
   ipcMain.on('app:closeWindow', (e) => BrowserWindow.fromWebContents(e.sender)?.close());
   ipcMain.on('clipboard:write', (_e, text: string) => clipboard.writeText(text));
   ipcMain.handle('clipboard:read', () => clipboard.readText());
@@ -918,24 +1186,45 @@ function registerIpc() {
 
 const PICTURE = /\.(png|jpe?g|gif|webp|svg|avif|bmp|heic|ico|tiff?)$/i;
 app.whenReady().then(() => {
-  protocol.handle('astrolabe', (req) => {
-    const u = new URL(req.url);
-    let p = decodeURIComponent(u.pathname);
+  // The app's settings, last session and pasted pictures are nobody else's to read.
+  try { fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 }); fs.chmodSync(CONFIG_DIR, 0o700); } catch {}
+  // The page asks for nothing but the clipboard; a camera, microphone, location and the rest are refused.
+  const ALLOWED = new Set(['clipboard-read', 'clipboard-sanitized-write']);
+  session.defaultSession.setPermissionRequestHandler((wc, permission, done) => done(ALLOWED.has(permission) && isAppPage(wc?.getURL() ?? '')));
+  session.defaultSession.setPermissionCheckHandler((wc, permission) => ALLOWED.has(permission) && isAppPage(wc?.getURL() ?? ''));
+  const notFound = () => new Response('Not found', { status: 404 });
+  protocol.handle('astrolabe', async (req) => {
+    let p: string;
+    try {
+      const u = new URL(req.url);
+      if (u.host !== 'app') return notFound();
+      p = decodeURIComponent(u.pathname);
+    } catch { return notFound(); }
+    if (p.includes('\0')) return notFound();
     if (p === '/' || p === '') p = '/index.html';
     const shot = /^\/__shot\/(\d+)\.png$/.exec(p);
     if (shot) {
       const png = shots.get(Number(shot[1]));
-      return png ? new Response(new Uint8Array(png), { headers: { 'content-type': 'image/png', 'cache-control': 'no-store' } }) : new Response('Not found', { status: 404 });
+      return png ? new Response(new Uint8Array(png), { headers: { 'content-type': 'image/png', 'cache-control': 'no-store' } }) : notFound();
     }
     // A picture in a note is a file on disk, which a page served from here may not load by its own path.
     const local = /^\/__file(\/.+)$/.exec(p);
     if (local) {
-      if (!PICTURE.test(local[1])) return new Response('Not found', { status: 404 });
-      return net.fetch(pathToFileURL(local[1]).toString()).catch(() => new Response('Not found', { status: 404 }));
+      if (!PICTURE.test(local[1])) return notFound();
+      try {
+        const res = await net.fetch(pathToFileURL(local[1]).toString());
+        // It is only ever a picture to look at. Opened as a page (an SVG can hold scripts) it could do nothing:
+        // no scripts, and not the app's own origin.
+        const headers = new Headers(res.headers);
+        headers.set('content-security-policy', "sandbox; default-src 'none'; style-src 'unsafe-inline'");
+        headers.set('x-content-type-options', 'nosniff');
+        return new Response(res.body, { status: res.status, headers });
+      } catch { return notFound(); }
     }
     const file = path.normalize(path.join(DIST, p));
-    if (!file.startsWith(DIST)) return new Response('Not found', { status: 404 });
-    return net.fetch(pathToFileURL(file).toString());
+    // Inside the built interface and nowhere else ("dist-electron" and "dist.old" also start with "dist").
+    if (!file.startsWith(DIST + path.sep)) return notFound();
+    return net.fetch(pathToFileURL(file).toString()).catch(notFound);
   });
   try { integrationDir = installZshIntegration(CONFIG_DIR); } catch { integrationDir = null; }
   registerIpc();

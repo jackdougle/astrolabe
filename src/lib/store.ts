@@ -1,9 +1,9 @@
 import { create } from 'zustand';
 import { api, appInfo, basename, tildify } from './api';
 import { carried, carry, hasCarried } from './handoff';
-import { addLeaf, Edge, keepLeaves, LayoutNode, leaves, moveLeaf, removeLeaf, replaceLeaf, setRatio } from './layout';
+import { addLeaf, addNode, Edge, keepLeaves, LayoutNode, leaves, moveLeaf, removeLeaf, replaceLeaf, setRatio } from './layout';
 import { exitDelay } from './motion';
-import { bus } from './panes';
+import { bus, markMoving } from './panes';
 import { applyTheme, getTheme } from './themes';
 
 export interface TermPane {
@@ -14,6 +14,8 @@ export interface TermPane {
   waiting?: boolean;
   branch: string | null; dirty: number; gitRoot: string | null;
   integrated: boolean; atPrompt: boolean; exited: boolean;
+  /** Hidden (⌘U): when it was. It keeps its place in its tab and its program keeps running; it is only off screen. */
+  hidden?: number;
 }
 export interface OpenFile {
   path: string; rendered: boolean;
@@ -43,7 +45,7 @@ export const EDITORS = 'editors';
 /** The editor area: how its editors are arranged (null while no file is open), and the one that has, or last had, the keyboard. */
 export interface EditorArea { root: LayoutNode | null; active: string; maximized: boolean }
 export type SidebarView = 'files' | 'search';
-export type PaletteMode = 'commands' | 'files' | 'history' | 'themes' | 'fonts-notes' | 'fonts-headings' | 'fonts-code' | 'settings' | 'appearance' | 'fonts' | 'sizes' | 'behaviour';
+export type PaletteMode = 'commands' | 'files' | 'history' | 'themes' | 'fonts-notes' | 'fonts-headings' | 'fonts-code' | 'settings' | 'appearance' | 'fonts' | 'sizes' | 'behaviour' | 'keys';
 
 export interface Settings {
   theme: string; zoom: number;
@@ -62,7 +64,7 @@ export interface Settings {
   /** Google Fonts family for headings in rendered notes; empty means the bundled Literata. */
   headingFont: string;
   wordWrap: boolean; smoothCaret: boolean;
-  /** Where new terminal tabs start, e.g. "~/brain2". Empty means your home folder. Splits stay in the folder you split from. */
+  /** Where new terminal tabs start, e.g. "~/projects". Empty means your home folder. Splits stay in the folder you split from. */
   startDirectory: string;
   /** Faint constellation lines behind everything. */
   starfield: boolean;
@@ -70,6 +72,12 @@ export interface Settings {
    *  address. When set, a picture put into a note is uploaded and the note holds that address, so it shows wherever
    *  the note's text goes. Empty (the default) sends nothing anywhere: pictures stay files beside the note. */
   imageUpload: string;
+  /** A command that prints what a new note (⌘N) starts with: a date line, a heading, a template. It is given the
+   *  note's folder as its last argument. Empty (the default): notes start empty. */
+  noteTemplate: string;
+  /** A command run each time a file's last tab is closed, with the file's path as its last argument. The last line it
+   *  prints, if any, is shown as a message. Empty (the default) runs nothing. */
+  onFileClose: string;
   /** 'shell' keeps your own prompt (Powerlevel10k and friends); 'astrolabe' draws the built-in one. */
   prompt: 'shell' | 'astrolabe';
   /** How solid the window background is, from 0 (clear) to 1 (opaque). */
@@ -86,7 +94,7 @@ export interface Settings {
 }
 export const DEFAULT_SETTINGS: Settings = {
   theme: 'meridian', zoom: 1, fontSize: 12.5, notesSize: 1, sidebarSize: 12.67, fontWeight: 600, fontFamily: '', notesFont: '', headingFont: '',
-  wordWrap: true, smoothCaret: true, restoreSession: true, previewTabs: true, starfield: true, startDirectory: '', imageUpload: '',
+  wordWrap: true, smoothCaret: true, restoreSession: true, previewTabs: true, starfield: true, startDirectory: '', imageUpload: '', noteTemplate: '', onFileClose: '',
   prompt: 'shell', opacityFocused: 0.95, opacityUnfocused: 0.89,
   chromeOpacityFocused: 1, chromeOpacityUnfocused: 0.94, scrollSpeed: 2.5, editorSide: 'right',
 };
@@ -109,7 +117,7 @@ interface State {
   palette: { mode: PaletteMode; n: number } | null;
   settings: Settings;
   fullscreen: boolean;
-  toast: { text: string; n: number; ms?: number } | null;
+  toast: { text: string; n: number; ms?: number; top?: boolean } | null;
   /** Panes, tabs and file tabs (`fileKey`) fading out after being closed. 'shown' keeps a closing tab's area visible while it fades. */
   leaving: Record<string, 'shown' | 'hidden'>;
 
@@ -118,6 +126,12 @@ interface State {
   newTab(cwd?: string, opts?: { stay?: boolean }): string;
   closeTab(id: string): void;
   closePane(id: string): void;
+  /** Takes a terminal off screen and leaves it running: the one given, or the one used last in the tab in front. */
+  hideTerm(id?: string): void;
+  /** Brings a hidden terminal back to its place in its tab, with the keyboard. */
+  showTerm(id: string): void;
+  /** Brings every hidden terminal back. The one hidden last ends up in front. */
+  showAllTerms(): void;
   /** A new terminal beside the one used last. Always a terminal, wherever the keyboard is. */
   split(dir: 'row' | 'col'): void;
   setActiveTab(id: string): void;
@@ -132,6 +146,16 @@ interface State {
   setAreaRatio(ratio: number): void;
   /** Moves a pane against one edge of another pane of its own area (of its own tab, for a terminal), or of the whole of it when `target` is null. */
   movePane(id: string, target: string | null, edge: Edge): void;
+  /** Combines two terminal tabs: every terminal on show in `from` goes into `into`, arranged as it was, against one
+   *  edge of the terminal `target` there (the right of the whole tab unless told otherwise). Nothing stops running.
+   *  `take` gives the keyboard to the terminal that had it in `from`; otherwise it stays where it is in `into`. */
+  joinTab(from: string, into: string, at?: { target?: string | null; edge?: Edge; take?: boolean }): void;
+  /** Moves one terminal to another tab, against one edge of the terminal `target` there, or (`into` null) to a new
+   *  tab of its own beside the one it was in. It keeps running, and takes the keyboard. */
+  moveTerm(id: string, into: string | null, at?: { target?: string | null; edge?: Edge }): void;
+  /** Takes in a terminal tab that came from another window (movein.ts): into a tab of this one, or as a tab of
+   *  the row at `index`. False when it cannot (a terminal of the same name is already here). */
+  takeIn(tab: Tab, panes: Record<string, Pane>, place: { tab: string; target: string | null; edge: Edge } | { index: number }): boolean;
   toggleMaximize(): void;
   /** With terminals and editors both open: lets the area you are in fill the window, or shows both again. */
   toggleFull(): void;
@@ -163,8 +187,9 @@ interface State {
   openPalette(mode: PaletteMode): void;
   closePalette(): void;
   updateSettings(patch: Partial<Settings>): void;
-  /** A short message at the bottom of the window; `ms` keeps it up longer (until the next message). */
-  showToast(text: string, ms?: number): void;
+  /** A short message at the bottom of the window; `ms` keeps it up longer (until the next message). `top` shows it
+   *  at the top instead, for something to be noticed once. */
+  showToast(text: string, ms?: number, top?: boolean): void;
 }
 
 let seq = 0;
@@ -233,7 +258,8 @@ export const useStore = create<State>((set, get) => ({
       const layout = adopt({ ...left, panes });
       if (layout.tabs.length || layout.editors.root) {
         set({ ready: true, settings, sidebar: left.sidebar, fullscreen: left.fullscreen, ...layout });
-        if (!layout.tabs.length) get().newTab(undefined, { stay: true });
+        // A file taken out of another window is all its own window holds.
+        if (!layout.tabs.length && !left.torn) get().newTab(undefined, { stay: true });
         return;
       }
     }
@@ -273,25 +299,40 @@ export const useStore = create<State>((set, get) => ({
     const s = get();
     const tab = s.tabs.find((t) => t.id === id);
     if (!tab || s.leaving[id]) return;
-    const remaining = s.tabs.filter((t) => t.id !== id && !s.leaving[t.id]);
-    // The window goes with its last tab only when no file is open either.
-    if (!remaining.length && !liveEditors(s).length) { set({ tabs: [], panes: {}, leaving: {}, editors: { root: null, active: '', maximized: false } }); dropBlankNotes(s.panes); api.state.save({ session: null }); api.app.closeWindow(); return; }
+    const all = leaves(tab.root);
+    const hid = all.filter((p) => isHidden(s.panes[p]));
+    // A tab with every terminal hidden is not on screen, so it simply goes.
+    if (hid.length === all.length) { removeTab(id); return; }
+    // Terminals hidden in this tab stay hidden, and running: only the ones on show close.
+    const finish = hid.length ? () => removeShown(id, all.filter((p) => !hid.includes(p))) : () => removeTab(id);
+    const remaining = tabGroups(s).filter((t) => t.id !== id);
+    if (!remaining.length && !liveEditors(s).length) {
+      // The window goes with its last tab only when no file is open either, and nothing is hidden.
+      if (!hiddenTerms(s).length) { set({ tabs: [], panes: {}, leaving: {}, editors: { root: null, active: '', maximized: false } }); dropBlankNotes(s.panes); api.state.save({ session: null }); api.app.closeWindow(); return; }
+      // Hidden terminals are still running, so the window stays, with a new terminal in it.
+      get().newTab();
+      fadeOut(id, false, finish);
+      return;
+    }
     const wasActive = s.activeTab === id;
     if (!remaining.length) {
       // The last terminal goes like any other: the files that are open are left with the window, and the keyboard.
       set({ focus: 'editor', areas: { ...s.areas, full: false } });
     } else if (wasActive) {
-      const idx = s.tabs.filter((t) => t.id === id || !s.leaving[t.id]).indexOf(tab);
+      const idx = s.tabs.filter((t) => t.id === id || remaining.includes(t)).indexOf(tab);
       set({ activeTab: remaining[Math.min(idx, remaining.length - 1)].id });
     }
-    fadeOut(id, wasActive, () => removeTab(id));
+    fadeOut(id, wasActive, finish);
   },
 
   closePane(id) {
     const s = get();
     const tree = treeOf(s, id);
-    if (!tree || s.leaving[id]) return;
-    const order = leaves(tree.root).filter((p) => p === id || !s.leaving[p]);
+    if (!tree) return;
+    // A hidden terminal is not on screen: it goes without changing what is.
+    if (isHidden(s.panes[id])) { removePane(id); return; }
+    if (s.leaving[id]) return;
+    const order = leaves(tree.root).filter((p) => p === id || (!s.leaving[p] && !isHidden(s.panes[p])));
     const rest = order.filter((p) => p !== id);
     if (tree.id === EDITORS) {
       // The last editor takes the editor area with it, and the keyboard goes back to the terminals.
@@ -305,6 +346,47 @@ export const useStore = create<State>((set, get) => ({
     const next = tab.activePane === id ? rest[Math.min(order.indexOf(id), rest.length - 1)] : tab.activePane;
     set({ tabs: s.tabs.map((t) => (t.id === tab.id ? { ...t, activePane: next, maximized: false } : t)) });
     fadeOut(id, true, () => removePane(id));
+  },
+
+  hideTerm(id) {
+    const s = get();
+    const tab = id ? s.tabs.find((t) => leaves(t.root).includes(id)) : tabGroups(s).find((t) => t.id === s.activeTab);
+    const pane = tab ? s.panes[id ?? tab.activePane] : null;
+    if (!tab || pane?.kind !== 'terminal' || pane.hidden || s.leaving[pane.id] || s.leaving[tab.id]) return;
+    const order = shownTerms(s, tab);
+    const rest = order.filter((p) => p !== pane.id);
+    const panes: Record<string, Pane> = { ...s.panes, [pane.id]: { ...pane, hidden: Date.now() } };
+    if (rest.length) {
+      // The terminals beside it take its room, and the keyboard.
+      const next = tab.activePane === pane.id ? rest[Math.min(order.indexOf(pane.id), rest.length - 1)] : tab.activePane;
+      set({ panes, tabs: s.tabs.map((t) => (t.id === tab.id ? { ...t, activePane: next, maximized: false } : t)) });
+    } else {
+      // The only terminal on show in its tab: the tab leaves the row with it.
+      const groups = tabGroups(s);
+      const remaining = groups.filter((t) => t.id !== tab.id);
+      if (remaining.length) set({ panes, activeTab: s.activeTab === tab.id ? remaining[Math.min(groups.indexOf(tab), remaining.length - 1)].id : s.activeTab });
+      else if (liveEditors(s).length) set({ panes, activeTab: '', focus: 'editor', areas: { ...s.areas, full: false } });
+      // Nothing else is open: a new terminal takes its place, so the window is never empty.
+      else { set({ panes }); get().newTab(); }
+    }
+    // It fades out as a closed terminal does, but it is only marked hidden, never removed.
+    fadeOut(pane.id, true, () => {});
+  },
+
+  showTerm(id) {
+    const s = get();
+    const pane = s.panes[id];
+    const tab = s.tabs.find((t) => leaves(t.root).includes(id));
+    if (!tab || pane?.kind !== 'terminal' || !pane.hidden || s.leaving[tab.id]) return;
+    const { [id]: _fading, ...leaving } = s.leaving;
+    set({
+      leaving, panes: { ...s.panes, [id]: { ...pane, hidden: undefined } }, activeTab: tab.id, focus: 'terminal',
+      tabs: s.tabs.map((t) => (t.id === tab.id ? { ...t, activePane: id, maximized: false } : t)),
+    });
+  },
+
+  showAllTerms() {
+    for (const p of hiddenTerms(get()).reverse()) get().showTerm(p.id);
   },
 
   split(dir) {
@@ -323,22 +405,22 @@ export const useStore = create<State>((set, get) => ({
 
   setActiveTab(id) {
     const s = get();
-    if (!s.tabs.some((t) => t.id === id) || s.leaving[id]) return;
+    if (!tabGroups(s).some((t) => t.id === id)) return;
     set({ activeTab: id, focus: 'terminal' });
   },
 
   commandFinished(paneId, exit) {
     const s = get();
     const tab = s.tabs.find((t) => leaves(t.root).includes(paneId));
-    // Nothing to flag when its terminals are in front of you.
-    if (!tab || (tab.id === s.activeTab && showing(s) !== 'editor')) return;
+    // Nothing to flag when its terminals are in front of you, or when it is hidden (its row in the list shows how it ended).
+    if (!tab || isHidden(s.panes[paneId]) || (tab.id === s.activeTab && showing(s) !== 'editor')) return;
     set({ tabs: s.tabs.map((t) => (t.id === tab.id ? { ...t, finished: exit ? 'failed' : 'ok', finishedPane: paneId } : t)) });
   },
 
   focusPane(id) {
     const s = get();
     const p = s.panes[id];
-    if (!p || s.leaving[id]) return;
+    if (!p || s.leaving[id] || isHidden(p)) return;
     if (p.kind === 'editor') {
       if (s.focus !== 'editor' || s.editors.active !== id) set({ focus: 'editor', editors: { ...s.editors, active: id } });
       return;
@@ -367,7 +449,7 @@ export const useStore = create<State>((set, get) => ({
     const s = get();
     const tab = s.tabs.find((t) => t.id === s.activeTab);
     if (!tab) return;
-    const order = leaves(tab.root).filter((p) => !s.leaving[p]);
+    const order = shownTerms(s, tab);
     const next = order[(order.indexOf(tab.activePane) + delta + order.length) % order.length];
     get().focusPane(next);
   },
@@ -399,6 +481,76 @@ export const useStore = create<State>((set, get) => ({
     else set({ activeTab: tree.id, focus: 'terminal', tabs: s.tabs.map((t) => (t.id === tree.id ? { ...t, root, activePane: id, maximized: false } : t)) });
   },
 
+  joinTab(from, into, at) {
+    const s = get();
+    const a = s.tabs.find((t) => t.id === from);
+    const b = s.tabs.find((t) => t.id === into);
+    if (!a || !b || a === b || s.leaving[a.id] || s.leaving[b.id]) return;
+    const ids = shownTerms(s, a);
+    const sub = keepLeaves(a.root, (id) => ids.includes(id));
+    if (!sub) return;
+    // Terminals hidden in `from` stay in it, hidden and running.
+    const rest = keepLeaves(a.root, (id) => !ids.includes(id));
+    const there = shownTerms(s, b);
+    const target = at?.target && there.includes(at.target) ? at.target : null;
+    const active = at?.take && ids.includes(a.activePane) ? a.activePane : there.includes(b.activePane) ? b.activePane : ids[0];
+    markMoving(ids);
+    const root = addNode(b.root, sub, target, at?.edge ?? 'right', uid('s'));
+    const tabs = s.tabs.flatMap((t): Tab[] => {
+      if (t.id === a.id) return rest ? [{ ...t, root: rest, activePane: leaves(rest)[0], maximized: false, finished: null, finishedPane: undefined }] : [];
+      return t.id === b.id ? [{ ...t, root, activePane: active, maximized: false }] : [t];
+    });
+    set({ tabs, activeTab: b.id, focus: 'terminal' });
+  },
+
+  moveTerm(id, into, at) {
+    const s = get();
+    const a = s.tabs.find((t) => leaves(t.root).includes(id));
+    const pane = s.panes[id];
+    if (!a || pane?.kind !== 'terminal' || pane.hidden || s.leaving[id] || s.leaving[a.id] || into === a.id) return;
+    const shown = shownTerms(s, a);
+    const rest = removeLeaf(a.root, id);
+    const b = into ? s.tabs.find((t) => t.id === into) : null;
+    // Alone on show in its tab, it has a tab of its own already.
+    if (into ? !b || !!s.leaving[b.id] : shown.length < 2 || !rest) return;
+    const left = shown.filter((p) => p !== id);
+    const was: Tab[] = rest ? [{ ...a, root: rest, activePane: a.activePane !== id ? a.activePane : left[Math.min(shown.indexOf(id), left.length - 1)] ?? leaves(rest)[0], maximized: false }] : [];
+    markMoving([id]);
+    const leaf: LayoutNode = { type: 'leaf', pane: id };
+    if (!b) {
+      const tab: Tab = { id: uid('tab'), root: leaf, activePane: id, maximized: false };
+      set({ tabs: s.tabs.flatMap((t) => (t.id === a.id ? [...was, tab] : [t])), activeTab: tab.id, focus: 'terminal' });
+      return;
+    }
+    const target = at?.target && shownTerms(s, b).includes(at.target) ? at.target : null;
+    const root = addNode(b.root, leaf, target, at?.edge ?? 'right', uid('s'));
+    set({ tabs: s.tabs.flatMap((t) => (t.id === a.id ? was : t.id === b.id ? [{ ...t, root, activePane: id, maximized: false }] : [t])), activeTab: b.id, focus: 'terminal' });
+  },
+
+  takeIn(tab, incoming, place) {
+    const s = get();
+    const ids = tab?.root ? leaves(tab.root) : [];
+    if (!s.ready || !ids.length || ids.some((id) => s.panes[id] || incoming[id]?.kind !== 'terminal')) return false;
+    const panes = { ...s.panes };
+    // A terminal that could not describe itself starts again in its folder.
+    for (const id of ids) { const p = incoming[id] as TermPane; panes[id] = hasCarried(`term:${id}`) ? { ...p, hidden: undefined } : { ...makeTerm(p.cwd), id }; }
+    const active = ids.includes(tab.activePane) ? tab.activePane : ids[0];
+    const b = 'tab' in place ? s.tabs.find((t) => t.id === place.tab && !s.leaving[t.id]) : null;
+    if (b && 'tab' in place) {
+      const target = place.target && shownTerms(s, b).includes(place.target) ? place.target : null;
+      const root = addNode(b.root, tab.root, target, place.edge, uid('s'));
+      set({ panes, tabs: s.tabs.map((t) => (t.id === b.id ? { ...t, root, activePane: active, maximized: false } : t)), activeTab: b.id, focus: 'terminal' });
+      return true;
+    }
+    const id = s.tabs.some((t) => t.id === tab.id) ? uid('tab') : tab.id;
+    const row = tabGroups(s);
+    const before = 'index' in place ? row[place.index] : undefined;
+    const tabs = [...s.tabs];
+    tabs.splice(before ? tabs.indexOf(before) : tabs.length, 0, { id, root: tab.root, activePane: active, maximized: false, finished: null });
+    set({ panes, tabs, activeTab: id, focus: 'terminal' });
+    return true;
+  },
+
   toggleMaximize() {
     const s = get();
     if (s.focus === 'editor' && s.editors.root) {
@@ -407,7 +559,7 @@ export const useStore = create<State>((set, get) => ({
       return;
     }
     const tab = s.tabs.find((t) => t.id === s.activeTab);
-    if (!tab || (leaves(tab.root).filter((p) => !s.leaving[p]).length < 2 && !tab.maximized)) return;
+    if (!tab || (shownTerms(s, tab).length < 2 && !tab.maximized)) return;
     set({ tabs: s.tabs.map((t) => (t.id === tab.id ? { ...t, maximized: !t.maximized } : t)) });
   },
 
@@ -597,7 +749,7 @@ export const useStore = create<State>((set, get) => ({
     api.settings.save(settings);
   },
 
-  showToast(text, ms) { set({ toast: { text, n: Date.now(), ms } }); },
+  showToast(text, ms, top) { set({ toast: { text, n: Date.now(), ms, top } }); },
 }));
 
 export const fileKey = (paneId: string, path: string) => `${paneId}\n${path}`;
@@ -609,9 +761,23 @@ export function liveEditors(s: Pick<State, 'panes' | 'editors' | 'leaving'>): Ed
   if (!s.editors.root) return [];
   return leaves(s.editors.root).filter((id) => !s.leaving[id]).map((id) => s.panes[id]).filter((p): p is EditorPane => p?.kind === 'editor');
 }
-/** The blocks of the tab row, left to right: every terminal tab still open. ⌘1–9 count these. */
-export function tabGroups(s: Pick<State, 'tabs' | 'leaving'>): Tab[] {
-  return s.tabs.filter((t) => !s.leaving[t.id]);
+const isHidden = (p: Pane | undefined) => p?.kind === 'terminal' && !!p.hidden;
+/** The terminals of a tab that are on show: not on their way out, and not hidden. */
+export function shownTerms(s: Pick<State, 'panes' | 'leaving'>, tab: Pick<Tab, 'root'>): string[] {
+  return leaves(tab.root).filter((id) => !s.leaving[id] && !isHidden(s.panes[id]));
+}
+/** The terminals hidden with ⌘U, the one hidden last first. They are still in their tabs and still running. */
+export function hiddenTerms(s: Pick<State, 'panes'>): TermPane[] {
+  return Object.values(s.panes).filter((p): p is TermPane => p.kind === 'terminal' && !!p.hidden).sort((a, b) => b.hidden! - a.hidden!);
+}
+/** The blocks of the tab row, left to right: every terminal tab still open with a terminal on show. ⌘1–9 count these. */
+export function tabGroups(s: Pick<State, 'tabs' | 'panes' | 'leaving'>): Tab[] {
+  return s.tabs.filter((t) => !s.leaving[t.id] && shownTerms(s, t).length > 0);
+}
+/** The tab in front and the area with the keyboard, once terminals have gone: a tab still in the row, else the editors. */
+function frontAfter(s: Pick<State, 'tabs' | 'panes' | 'leaving' | 'activeTab' | 'focus'>): Pick<State, 'activeTab' | 'focus'> {
+  const groups = tabGroups(s);
+  return { activeTab: groups.some((t) => t.id === s.activeTab) ? s.activeTab : groups[0]?.id ?? '', focus: groups.length ? s.focus : 'editor' };
 }
 /** Every open file, in the order their tabs sit in the row. ⌥⌘1–9 count these. */
 export function openFiles(s: Pick<State, 'panes' | 'editors' | 'leaving'>): { pane: string; path: string }[] {
@@ -679,17 +845,19 @@ function adopt(saved: SavedLayout): Pick<State, 'tabs' | 'activeTab' | 'panes' |
   // Nothing is kept that the layout does not show.
   const used = new Set([...tabs.flatMap((t) => leaves(t.root)), ...(editors.root ? leaves(editors.root) : [])]);
   for (const id of Object.keys(panes)) if (!used.has(id)) delete panes[id];
-  if (focus === 'editor' ? !editors.root : !tabs.length) focus = editors.root && !tabs.length ? 'editor' : 'terminal';
+  // A tab whose terminals are all hidden is not in the row, so it is never the one in front.
+  const seen = tabs.filter((t) => leaves(t.root).some((id) => !isHidden(panes[id])));
+  if (focus === 'editor' ? !editors.root : !seen.length) focus = editors.root && !seen.length ? 'editor' : 'terminal';
   const ratio = Number(saved.areas?.ratio);
   return {
     tabs, panes, editors, focus, termCwd: saved.termCwd ?? null,
-    activeTab: tabs.find((t) => t.id === saved.activeTab)?.id ?? tabs[0]?.id ?? '',
+    activeTab: seen.find((t) => t.id === saved.activeTab)?.id ?? seen[0]?.id ?? '',
     areas: { ratio: ratio > 0.04 && ratio < 0.96 ? ratio : 0.5, full: saved.areas ? !!saved.areas.full : !!front?.full },
   };
 }
 
 /** What a page reloading in place leaves for the next one (see handoff.ts). */
-interface Carried extends SavedLayout { sidebar: State['sidebar']; fullscreen: boolean }
+interface Carried extends SavedLayout { sidebar: State['sidebar']; fullscreen: boolean; /** It is a tab taken out of another window (tearoff.ts). */ torn?: boolean }
 carry('layout', (): Carried | null => {
   const s = useStore.getState();
   if (!s.ready || (!s.tabs.length && !s.editors.root)) return null;
@@ -720,13 +888,24 @@ function removeTab(id: string) {
   const tabs = s.tabs.filter((t) => t.id !== id);
   if (!tabs.length && !s.editors.root) return;
   const last = s.panes[tab.activePane];
-  useStore.setState({
-    tabs, panes: Object.fromEntries(Object.entries(s.panes).filter(([k]) => !gone.has(k))),
-    activeTab: s.activeTab === id ? tabs[0]?.id ?? '' : s.activeTab,
-    focus: tabs.length ? s.focus : 'editor',
-    termCwd: last?.kind === 'terminal' ? last.cwd : s.termCwd,
-  });
+  const panes = Object.fromEntries(Object.entries(s.panes).filter(([k]) => !gone.has(k)));
+  useStore.setState({ tabs, panes, ...frontAfter({ ...s, tabs, panes }), termCwd: last?.kind === 'terminal' && !last.hidden ? last.cwd : s.termCwd });
   dropBlankNotes(s.panes);
+}
+
+/** Takes the terminals `ids` out of a tab that keeps others: hidden ones, which stay in it and stay running. */
+function removeShown(tabId: string, ids: string[]) {
+  const s = useStore.getState();
+  const tab = s.tabs.find((t) => t.id === tabId);
+  if (!tab) return;
+  const gone = new Set(ids);
+  const root = keepLeaves(tab.root, (p) => !gone.has(p));
+  if (!root) { removeTab(tabId); return; }
+  const rest = leaves(root);
+  const last = s.panes[tab.activePane];
+  const panes = Object.fromEntries(Object.entries(s.panes).filter(([k]) => !gone.has(k)));
+  const tabs = s.tabs.map((t) => (t.id === tabId ? { ...t, root, activePane: rest.includes(t.activePane) ? t.activePane : rest[0], maximized: false, finished: null, finishedPane: undefined } : t));
+  useStore.setState({ tabs, panes, ...frontAfter({ ...s, tabs, panes }), termCwd: last?.kind === 'terminal' ? last.cwd : s.termCwd });
 }
 
 function removePane(id: string) {
@@ -743,7 +922,10 @@ function removePane(id: string) {
   }
   if (!root) { s.closeTab(tree.id); return; }
   const rest = leaves(root);
-  useStore.setState({ panes, termCwd: gone?.kind === 'terminal' ? gone.cwd : s.termCwd, tabs: s.tabs.map((t) => (t.id === tree.id ? { ...t, root, activePane: rest.includes(t.activePane) ? t.activePane : rest[0] } : t)) });
+  // The keyboard goes to a terminal that is on show, when the tab has one.
+  const next = rest.find((p) => !s.leaving[p] && !isHidden(panes[p])) ?? rest[0];
+  const tabs = s.tabs.map((t) => (t.id === tree.id ? { ...t, root, activePane: rest.includes(t.activePane) ? t.activePane : next } : t));
+  useStore.setState({ panes, tabs, ...frontAfter({ ...s, tabs, panes }), termCwd: gone?.kind === 'terminal' && !gone.hidden ? gone.cwd : s.termCwd });
 }
 
 function removeFile(paneId: string, path: string) {
@@ -805,7 +987,7 @@ function shortDir(dir: string) {
   const first = parts[0] === '' ? `/${parts[1]}` : parts[0];
   return `${first}/…/${parts[parts.length - 1]}`;
 }
-/** A terminal is named for where you are and what you are running there: "~/brain2 terminal", "~/brain2 claude". */
+/** A terminal is named for where you are and what you are running there: "~/project terminal", "~/project claude". */
 export function termLabel(p: TermPane): { dir: string; app: string } {
   return { dir: shortDir(tildify(p.gitRoot ?? p.cwd)), app: p.running ? appName(p.command) : 'terminal' };
 }

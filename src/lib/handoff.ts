@@ -1,6 +1,6 @@
 import { api } from './api';
 
-// A window can reload in place (⌘R after a change to the interface, or Reload Window):
+// A window can reload in place (the update notice's Reload after a change to the interface, or Reload Window):
 // the page is replaced but the main process, and every shell it runs, carries on. Just before the old page
 // goes it hands over whatever the new one needs to look and behave as if nothing happened: the layout, each
 // terminal's screen, unsaved typing. Anything can add a piece with `carry`; the new page reads it with `carried`.
@@ -27,6 +27,12 @@ export function carried<T>(name: string): T | undefined {
   return value;
 }
 export const hasCarried = (name: string) => name in incoming;
+/** Leaves a piece under a name as a reloaded page would have: for what arrives from another window (movein.ts). */
+export function offer(name: string, value: unknown) { if (value != null) incoming[name] = value; }
+/** What a named piece would hand on at this moment: for a tab that leaves for another window (tearoff.ts). */
+export async function partNow<T>(name: string): Promise<T | undefined> {
+  try { return (await parts.get(name)?.()) as T | undefined; } catch { return undefined; }
+}
 /** True when this page took over from one that was reloaded in place. */
 export const resumed = () => resumedNow;
 

@@ -2,7 +2,7 @@
 # Uploads one picture to a public Vercel Blob store and prints its web address. Astrolabe runs this for each
 # picture put into a note when the `imageUpload` setting names it:
 #
-#   "imageUpload": "~/brain2/async/astrolabe/scripts/upload-image.sh"
+#   "imageUpload": "/path/to/astrolabe/scripts/upload-image.sh"
 #
 # The store's read-write token is read from $BLOB_READ_WRITE_TOKEN, or from the file ~/.astrolabe/blob-token.
 # A picture's address comes from its contents, so the same picture uploaded twice has one address, and nobody

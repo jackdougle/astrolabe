@@ -62,8 +62,10 @@ async function boot() {
   import('./lib/outside').then((m) => m.watchOutsideFiles());
   // Glyphs drawn while the page was hidden under that picture come out a shade heavier; draw them again now it is not.
   if (resumed()) import('./lib/termSession').then((m) => m.allSessions().forEach((t) => t.term.clearTextureAtlas()));
+  // A reload that went well says nothing: the window standing there up to date is the news. Main still sends
+  // 'Updated' for it; only a note about something going wrong (the last build put back) is shown.
   const note = carried<string>('note');
-  if (note) useStore.getState().showToast(note);
+  if (note && note !== 'Updated') useStore.getState().showToast(note);
 }
 // A build that cannot start says so, and a window that was reloading goes back to the build before it.
 boot().catch((err) => { api.app.bootFailed?.(); throw err; });

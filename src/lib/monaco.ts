@@ -77,6 +77,13 @@ carry('files', (): CarriedFiles => ({
   unsaved: Object.fromEntries([...files].filter(([, e]) => !e.model.isDisposed() && isDirty(e)).map(([path, e]) => [path, e.model.getValue()])),
   history,
 }));
+/** Unsaved typing that came with a file from another window: the file shows it when it opens here. A file already
+ *  open here with unsaved typing of its own keeps that. */
+export function bringUnsaved(path: string, text: string) {
+  const entry = files.get(path);
+  if (entry && !entry.model.isDisposed()) { if (!isDirty(entry) && entry.model.getValue() !== text) entry.model.setValue(text); return; }
+  (left ??= { unsaved: {}, history: [] }).unsaved[path] = text;
+}
 /** Settles when every file being opened has its text. */
 export const filesLoaded = () => Promise.allSettled([...loading.values()]);
 

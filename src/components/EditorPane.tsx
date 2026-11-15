@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { basename, dirname } from '../lib/api';
 import { closeFileTab, createEntry, noteLink, pickAndAttach, renameEntry } from '../lib/commands';
+import { count, Counts, plain } from '../lib/counts';
 import { graphRoot, isGraph } from '../lib/graph';
 import { carried, carry } from '../lib/handoff';
 import { attachEmoji, contextValue, loadFile, loneColon, monaco, monoFont, overflowNode } from '../lib/monaco';
@@ -8,7 +9,7 @@ import { bus, paneHandles } from '../lib/panes';
 import { pasteLink } from '../lib/rawMarkdown';
 import { drawWires, rgb } from '../lib/titleWires';
 import { mountRich, RichHandle } from '../lib/richMarkdown';
-import { EditorPane as EditorPaneState, focusedId, isMarkdown, liveEditors, projectRoot, scrollSpeed, showing, useStore } from '../lib/store';
+import { EditorPane as EditorPaneState, focusedId, isMarkdown, projectRoot, scrollSpeed, useStore } from '../lib/store';
 import { GraphView } from './GraphView';
 
 const LIST_ITEM = /^(\s*)([-*+]|\d+[.)])(\s+)(\[[ xX]\]\s+)?/;
@@ -162,7 +163,6 @@ export function EditorPane({ pane, active }: { pane: EditorPaneState; active: bo
   const [richNote, setRichNote] = useState<string | null>(null);
   const settings = useStore((s) => s.settings);
   // The editor fills its tab: nothing beside it, or expanded over the rest.
-  const alone = useStore((s) => showing(s) === 'editor' && (s.editors.maximized ? s.editors.active === pane.id : liveEditors(s).length === 1));
   const file = pane.files.find((f) => f.path === pane.active) ?? null;
   const rendered = !!file && file.rendered && isMarkdown(file.path);
   const renderedRef = useRef(rendered);
@@ -313,7 +313,7 @@ export function EditorPane({ pane, active }: { pane: EditorPaneState; active: bo
 
   // Its files are tabs in the row along the top of the window, beside the terminals' (TabStrip in App.tsx).
   return (
-    <div className={`editor-pane${alone ? ' is-centered' : ''}`}>
+    <div className="editor-pane">
       {/* A centred raw note leaves empty margins: the wheel and clicks there still reach the editor. */}
       <div className="editor-body" tabIndex={-1}
         onWheel={(e) => { const ed = editorRef.current; if (e.target === e.currentTarget && ed && !rendered) ed.setScrollTop(ed.getScrollTop() + e.deltaY * scrollSpeed(settings)); }}
@@ -329,6 +329,86 @@ export function EditorPane({ pane, active }: { pane: EditorPaneState; active: bo
         {!file && <EmptyEditor />}
         {error && <div className="editor-error"><p>{error}</p><button onClick={() => closeFileTab(pane.id, pane.active!)}>Close this tab</button></div>}
       </div>
+      {file && !graph && !error && <WordCount editor={editorRef} rich={richRef} rendered={rendered} loaded={loaded} />}
+    </div>
+  );
+}
+
+const COUNT_LIMIT = 2_000_000; // characters: a file longer than this is not counted as it is typed in
+const num = (n: number) => n.toLocaleString('en-US');
+const many = (n: number, one: string) => `${num(n)} ${one}${n === 1 ? '' : 's'}`;
+
+/** The counter in the bottom right corner of a note or a text file (not of code): its words, or how many of them are
+ *  selected. A click opens the rest: characters with and without spaces, paragraphs, and how long it takes to read.
+ *  A note's Markdown is not counted (counts.ts), so the numbers are the same raw and rendered. */
+function WordCount({ editor, rich, rendered, loaded }: { editor: React.RefObject<monaco.editor.IStandaloneCodeEditor | null>; rich: React.RefObject<HTMLDivElement | null>; rendered: boolean; loaded: number }) {
+  const [all, setAll] = useState<Counts | null>(null);
+  const [picked, setPicked] = useState<Counts | null>(null);
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const ed = editor.current;
+    const model = ed?.getModel();
+    const lang = model?.getLanguageId();
+    if (!ed || !model || (lang !== 'markdown' && lang !== 'plaintext') || model.getValueLength() > COUNT_LIMIT) { setAll(null); setPicked(null); return; }
+    const read = (text: string) => count(lang === 'markdown' ? plain(text) : text);
+    let timer = 0;
+    let frame = 0;
+    const total = () => { timer = 0; setAll(read(model.getValue())); };
+    const selected = () => {
+      frame = 0;
+      if (rendered) {
+        // The rendered view's selection is the page's own. What it still shows as written ([[a note's name]], the #s
+        // of the heading the caret is in) is left out here as it is from the whole.
+        const sel = document.getSelection();
+        const root = rich.current;
+        const inside = !!sel && !sel.isCollapsed && !!root && root.contains(sel.anchorNode) && root.contains(sel.focusNode);
+        setPicked(inside ? read(sel.toString()) : null);
+      } else {
+        const sels = (ed.getSelections() ?? []).filter((s) => !s.isEmpty());
+        setPicked(sels.length ? read(sels.map((s) => model.getValueInRange(s)).join('\n')) : null);
+      }
+    };
+    const later = () => { if (!frame) frame = requestAnimationFrame(selected); };
+    total(); selected();
+    const edits = model.onDidChangeContent(() => { if (!timer) timer = window.setTimeout(total, 120); later(); });
+    const carets = rendered ? null : ed.onDidChangeCursorSelection(later);
+    if (rendered) document.addEventListener('selectionchange', later);
+    return () => { window.clearTimeout(timer); cancelAnimationFrame(frame); edits.dispose(); carets?.dispose(); document.removeEventListener('selectionchange', later); };
+  }, [loaded, rendered]);
+
+  // A click anywhere else, or Esc, puts it away.
+  useEffect(() => {
+    if (!open) return;
+    const press = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(false); };
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setOpen(false); } };
+    document.addEventListener('mousedown', press, true);
+    document.addEventListener('keydown', key, true);
+    return () => { document.removeEventListener('mousedown', press, true); document.removeEventListener('keydown', key, true); };
+  }, [open]);
+
+  if (!all) return null;
+  const rows = (c: Counts) => (<>
+    <b>{num(c.words)}</b><span>{c.words === 1 ? 'word' : 'words'}</span>
+    <b>{num(c.chars)}</b><span>{c.chars === 1 ? 'character' : 'characters'}</span>
+    <b>{num(c.noSpaces)}</b><span>{c.noSpaces === 1 ? 'character' : 'characters'} without spaces</span>
+  </>);
+  const minutes = !all.words ? '0 min' : all.minutes < 1 ? '< 1 min' : `${Math.round(all.minutes)} min`;
+  // The mouse going down here does not take the keyboard from the text, so what is selected there stays selected.
+  return (
+    <div className="counts" ref={ref} onMouseDown={(e) => e.preventDefault()}>
+      {open && (
+        <div className="counts-pop" role="dialog" aria-label="Word count">
+          {picked && <><div className="counts-head">Selected</div>{rows(picked)}<div className="counts-head">Whole file</div></>}
+          {rows(all)}
+          <b>{num(all.paragraphs)}</b><span>{all.paragraphs === 1 ? 'paragraph' : 'paragraphs'}</span>
+          <b>{minutes}</b><span>to read</span>
+        </div>
+      )}
+      <button className="counts-chip" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+        {picked ? `${num(picked.words)} of ${many(all.words, 'word')}` : many(all.words, 'word')}
+      </button>
     </div>
   );
 }

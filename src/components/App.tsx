@@ -1,15 +1,18 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { api, basename, tildify } from '../lib/api';
-import { attachPaths, closeFileTab, handleShortcut, newFileBeside, pathsOf, pickAndAttach, runCommand } from '../lib/commands';
+import { attachPaths, closeFileTab, formatKeys, handleShortcut, newFileBeside, pathsOf, pickAndAttach, runCommand, updateApp } from '../lib/commands';
 import { addLeaf, computeLayout, DividerRect, Edge, findSplit, keepLeaves, leafShares, LayoutNode, leaves, moveLeaf, PaneRect, Rect } from '../lib/layout';
 import { graphRoot, isGraph } from '../lib/graph';
+import { fileIconName } from '../lib/fileIcons';
 import { markBooted, reducedMotion, useEntering } from '../lib/motion';
 import { monoFont, refreshFiles, setMonacoTheme } from '../lib/monaco';
 import { richHooks } from '../lib/richMarkdown';
 import { bus, focusPane, paneHandles } from '../lib/panes';
-import { EditorPane as EditorPaneState, EDITORS, fileKey, focusedId, isMarkdown, liveEditors, openFiles, Pane, scrollSpeed, showing, Tab, tabGroups, TermPane, termLabel, useStore } from '../lib/store';
+import { EditorPane as EditorPaneState, EDITORS, fileKey, focusedId, hiddenTerms, isMarkdown, liveEditors, openFiles, Pane, scrollSpeed, showing, shownTerms, Tab, tabGroups, TermPane, termLabel, useStore } from '../lib/store';
 import { allSessions, getSession } from '../lib/termSession';
+import { Landing, landing, onBlock, Over } from '../lib/movein';
+import { canTear, TEAR_EDGE, tearSpec, Torn } from '../lib/tearoff';
 import { getTheme } from '../lib/themes';
 import { EditorPane } from './EditorPane';
 import { Icon } from './Icons';
@@ -113,6 +116,8 @@ export function App() {
       </div>
       <Palette />
       <Toast />
+      <UpdateNotice />
+      <Incoming />
       <Tooltip />
     </div>
   );
@@ -165,7 +170,7 @@ function TabStrip() {
   }, []);
 
   const live = liveEditors({ panes, editors, leaving });
-  const groups = tabGroups({ tabs, leaving });
+  const groups = tabGroups({ tabs, panes, leaving });
   const both = live.length > 0 && groups.length > 0;
   const spans = areaSpans(both, ratio, side);
   const zones: Zone[] = [];
@@ -226,6 +231,8 @@ function TabStrip() {
 
 /** Puts the keyboard in the pane that has it in the store. */
 const focusFront = () => { const id = focusedId(); if (id) focusPane(id); };
+/** A terminal taken off screen with ⌘U. It stays where it is in its tab, running, and is left out of what is drawn. */
+const isOff = (p: Pane | undefined) => p?.kind === 'terminal' && !!p.hidden;
 
 /** When the children of a row change places, each slides from where it was to where it now is. */
 function useFlip(ref: React.RefObject<HTMLElement | null>) {
@@ -255,17 +262,34 @@ interface DragOpts {
   reorder(key: string, onto: string): void;
   /** For a tab that can be taken out of its row: where it is while outside, that it came back, and where it was let go. */
   away?: { over(x: number, y: number): void; back(): void; drop(x: number, y: number): void };
+  /** For a tab that can leave the window: let go outside it, the tab becomes a window of its own there (tearoff.ts). */
+  tear?: Torn;
+  /** For a tab that can be combined with another of its row: let go on the middle of that one, it joins it. */
+  onto?(key: string): void;
 }
 /** Drags a tab of the row by hand: it stays under the pointer, and the tabs it passes slide out of its way as it goes. */
 function dragTab(e: React.MouseEvent<HTMLElement>, opts: DragOpts) {
-  if (e.button !== 0) return;
+  if (e.button !== 0 || e.ctrlKey) return;
   const el = e.currentTarget;
   const row = el.parentElement!;
   const start = { x: e.clientX, y: e.clientY };
   let grab = { x: 0, y: 0 };
   let on = false;
   let out = false;
+  // Past the window's edge: the tab waits in its place in the row, and an outline out there shows the window it would become.
+  let torn = false;
+  const tears = !!opts.tear && canTear();
+  const tearNow = () => { const r = row.getBoundingClientRect(); return tearSpec(opts.tear!, at, grab, { x: r.left + el.offsetLeft, y: r.top + el.offsetTop, w: el.offsetWidth, h: el.offsetHeight }); };
   let at = start;
+  // The tab it is over the middle of, and would join if let go.
+  let onto: HTMLElement | null = null;
+  const aim = (n: HTMLElement | null) => {
+    if (n === onto) return;
+    onto?.classList.remove('is-target');
+    onto = n;
+    n?.classList.add('is-target');
+    el.classList.toggle('is-joining', !!n);
+  };
   // Its own place in the row is worked out afresh each time, since the row changes under it.
   const place = (x: number, y: number) => {
     el.style.transform = '';
@@ -284,6 +308,20 @@ function dragTab(e: React.MouseEvent<HTMLElement>, opts: DragOpts) {
       el.classList.add('is-dragging');
       document.body.classList.add('is-dragging-tab');
     }
+    if (tears && (at.x < -TEAR_EDGE || at.y < -TEAR_EDGE || at.x > window.innerWidth + TEAR_EDGE || at.y > window.innerHeight + TEAR_EDGE)) {
+      if (!torn) {
+        torn = true;
+        aim(null);
+        if (out) { out = false; opts.away!.back(); }
+        el.classList.remove('is-away');
+        el.classList.add('is-torn');
+        el.style.transition = reducedMotion() ? 'none' : 'transform 0.18s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.18s';
+        el.style.transform = '';
+      }
+      api.app.tearOver(tearNow());
+      return;
+    }
+    if (torn) { torn = false; el.classList.remove('is-torn'); el.style.transition = 'none'; api.app.tearOver(null); }
     const bar = row.closest('.topbar')!.getBoundingClientRect();
     const zone = (row.closest('.zone') ?? row).getBoundingClientRect();
     const wasOut = out;
@@ -297,18 +335,31 @@ function dragTab(e: React.MouseEvent<HTMLElement>, opts: DragOpts) {
     const left = row.getBoundingClientRect().left;
     const mid = at.x - grab.x + r.width / 2;
     let to = 0;
-    for (const n of all) if (n !== el && left + n.offsetLeft + n.offsetWidth / 2 < mid) to++;
+    if (opts.onto) {
+      // The pointer decides. On the middle half of another tab, this one would join it; a tab gives up its place
+      // only once the pointer is past that middle, so there is room to stop on it.
+      const me = all.indexOf(el);
+      const span = (n: HTMLElement) => ({ left: left + n.offsetLeft, width: n.offsetWidth });
+      const hit = at.y <= bar.bottom + 24 ? all.find((n) => n !== el && at.x >= span(n).left && at.x <= span(n).left + n.offsetWidth && onBlock(at.x, span(n))) : undefined;
+      aim(hit ?? null);
+      if (hit) return;
+      all.forEach((n, i) => { if (n !== el && span(n).left + n.offsetWidth * (i < me ? 0.25 : 0.75) < at.x) to++; });
+    } else for (const n of all) if (n !== el && left + n.offsetLeft + n.offsetWidth / 2 < mid) to++;
     if (to !== all.indexOf(el) && all[to]) { flushSync(() => opts.reorder(el.dataset.flip!, all[to].dataset.flip!)); place(at.x, at.y); }
   };
   const end = (dropped: boolean) => {
     window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); window.removeEventListener('keydown', key, true);
     if (!on) return;
     document.body.classList.remove('is-dragging-tab');
-    if (out) { if (dropped) opts.away!.drop(at.x, at.y); else opts.away!.back(); }
+    const join = dropped && !torn ? onto?.dataset.flip : undefined;
+    aim(null);
+    if (join) opts.onto!(join);
+    if (torn) api.app.tearDrop(dropped ? tearNow() : null);
+    else if (out) { if (dropped) opts.away!.drop(at.x, at.y); else opts.away!.back(); }
     // It settles into its place.
     el.style.transition = reducedMotion() ? 'none' : 'transform 0.18s cubic-bezier(0.2, 0.8, 0.2, 1)';
     el.style.transform = '';
-    el.classList.remove('is-away');
+    el.classList.remove('is-away', 'is-torn');
     window.setTimeout(() => { el.style.transition = ''; el.classList.remove('is-dragging'); }, 190);
     focusFront();
   };
@@ -325,7 +376,14 @@ function TabRow({ tabs, panes, leaving, activeTab, focused, onScreen }: { tabs: 
   return (
     <>
       <div className="tab-row" ref={ref}>
-        {tabs.map((t) => <TabBlock key={t.id} tab={t} panes={panes} leaving={leaving} n={leaving[t.id] ? -1 : n++} front={t.id === activeTab} focused={focused} onScreen={onScreen} />)}
+        {tabs.map((t) => {
+          // A hidden terminal has no segment (one still fading out keeps its own until it has), and a tab with every
+          // terminal hidden is out of the row until one is brought back.
+          const ids = leaves(t.root).filter((id) => !!leaving[id] || !isOff(panes[id]));
+          if (!ids.length) return null;
+          const live = !leaving[t.id] && ids.some((id) => !leaving[id]);
+          return <TabBlock key={t.id} tab={t} ids={ids} panes={panes} leaving={leaving} n={live ? n++ : -1} front={t.id === activeTab} focused={focused} onScreen={onScreen} />;
+        })}
       </div>
       <button className="top-btn" {...tip('New terminal tab', 'tab.new')} onClick={() => runCommand('tab.new')}><Icon name="plus" size={14} /></button>
     </>
@@ -333,17 +391,31 @@ function TabRow({ tabs, panes, leaving, activeTab, focused, onScreen }: { tabs: 
 }
 
 /** One terminal tab's block: a segment for each of its terminals, then the number that brings it to the front. */
-function TabBlock({ tab, panes, leaving, n, front, focused, onScreen }: { tab: Tab; panes: Record<string, Pane>; leaving: Record<string, unknown>; n: number; front: boolean; focused: boolean; onScreen: boolean }) {
+function TabBlock({ tab, ids, panes, leaving, n, front, focused, onScreen }: { tab: Tab; /** Its terminals that are not hidden. */ ids: string[]; panes: Record<string, Pane>; leaving: Record<string, unknown>; n: number; front: boolean; focused: boolean; onScreen: boolean }) {
   const [entering, entered] = useEntering();
   const ref = useRef<HTMLDivElement>(null);
   useFlip(ref);
-  const ids = leaves(tab.root);
   const gone = !!leaving[tab.id] || ids.every((id) => leaving[id]);
   const flagged = tab.finished ? (tab.finishedPane && ids.includes(tab.finishedPane) ? tab.finishedPane : ids[0]) : undefined;
   const reorder = (key: string, onto: string) => { const st = useStore.getState(); st.moveTab(st.tabs.findIndex((t) => t.id === key), st.tabs.findIndex((t) => t.id === onto)); };
+  // Let go on another tab, this one joins it, and the terminal that was taken hold of keeps the keyboard.
+  const onto = (key: string) => useStore.getState().joinTab(tab.id, key, { take: true });
+  // Right-click: combine it with the tab in front, or give the terminal clicked a tab of its own.
+  const onMenu = async (e: React.MouseEvent) => {
+    e.preventDefault();
+    if (gone || !api.app.tabMenu) return;
+    const seg = (e.target as HTMLElement).closest<HTMLElement>('.toptab')?.dataset.flip;
+    const s = useStore.getState();
+    const pick = await api.app.tabMenu({ join: s.activeTab !== tab.id && tabGroups(s).some((t) => t.id === s.activeTab), part: shownTerms(s, tab).length > 1 });
+    const st = useStore.getState();
+    if (pick === 'join') st.joinTab(tab.id, st.activeTab);
+    else if (pick === 'part') st.moveTerm(seg && shownTerms(st, tab).includes(seg) ? seg : tab.activePane, null);
+    else if (pick === 'close') st.closeTab(tab.id);
+    if (pick) focusFront();
+  };
   return (
     <div ref={ref} className={`tab-group${front ? ' is-front' : ''}${ids.length > 3 ? ' is-dense' : ''}${entering ? ' is-entering' : ''}${gone ? ' is-leaving' : ''}`} data-tab={tab.id} data-flip={tab.id}
-      onAnimationEnd={entered} onMouseDown={(e) => { if (!gone) dragTab(e, { reorder }); }}>
+      onAnimationEnd={entered} onContextMenu={onMenu} onMouseDown={(e) => { if (!gone) dragTab(e, { reorder, onto, tear: { kind: 'tab', id: tab.id } }); }}>
       {ids.map((id) => {
         const p = panes[id];
         if (p?.kind !== 'terminal') return null;
@@ -375,7 +447,7 @@ function TermSeg(props: SegProps & { pane: TermPane; finished: 'ok' | 'failed' |
   return (
     <div className={`toptab${running ? ' is-running' : ''}${finished ? ` is-finished is-${finished}` : ''}${segClass(props, entering)}`} style={{ flexGrow: weight }} title={`${l.dir} ${l.app}`} data-flip={p.id}
       onAnimationEnd={entered}
-      onMouseDown={(e) => { if (e.button === 0) { useStore.getState().focusPane(p.id); focusFront(); } }}
+      onMouseDown={(e) => { if (e.button === 0 && !e.ctrlKey) { useStore.getState().focusPane(p.id); focusFront(); } }}
       onAuxClick={(e) => { if (e.button === 1) close(); }}>
       <span className={`tab-mark${running ? ' is-running' : finished === 'ok' ? ' is-ok' : failed || finished === 'failed' ? ' is-failed' : ''}`} />
       <span className="toptab-text is-path"><span className="top-dir">{l.dir ? `${l.dir} ` : ''}</span><span className="top-app">{l.app}</span></span>
@@ -401,7 +473,8 @@ function FileRow({ pane, leaving, dirty, files, focused, onScreen }: { pane: Edi
 }
 
 /** An open file. Right-click for a new file beside it. Dragged along its row it changes places; dragged onto another
- *  editor's row it joins that editor; dragged down onto an editor it lands there, against the edge it is nearest. */
+ *  editor's row it joins that editor; dragged down onto an editor it lands there, against the edge it is nearest;
+ *  dragged out of the window it becomes a window of its own. */
 function FileTab({ pane, path, temp, dirty, hint, active, shown, leaving }: { pane: string; path: string; /** A temporary tab: the next file opened takes its place. A double click keeps it. */ temp: boolean; dirty: boolean; /** The keys that bring it to the front. */ hint?: string; active: boolean; shown: boolean; leaving: boolean }) {
   const [entering, entered] = useEntering();
   const close = () => closeFileTab(pane, path);
@@ -418,6 +491,7 @@ function FileTab({ pane, path, temp, dirty, hint, active, shown, leaving }: { pa
     st.activateFile(pane, path); st.focusPane(pane); focusFront();
     if (leaving) return;
     dragTab(e, {
+      tear: { kind: 'file', pane, path },
       reorder: (key, onto) => useStore.getState().moveFile(pane, key, onto),
       away: {
         over: (x, y) => { const zone = rowAt(x, y); mark(zone); zone?.classList.add('is-target'); bus.emit('filedrag', zone ? null : { x, y, pane, path }); },
@@ -436,11 +510,37 @@ function FileTab({ pane, path, temp, dirty, hint, active, shown, leaving }: { pa
       onAnimationEnd={entered} onContextMenu={onMenu} onMouseDown={down} onDoubleClick={() => useStore.getState().keepFile(path, pane)}
       onAuxClick={(e) => { if (e.button === 1) close(); }}>
       {/* A file with unsaved changes has no mark of its own: its page glows and pulses, as a terminal's dot does while it works. */}
-      <span className={`tab-file${dirty ? ' is-dirty' : ''}`} title={dirty ? 'Unsaved changes' : undefined}><Icon name={isGraph(path) ? 'graph' : 'file'} size={12} /></span>
+      <span className={`tab-file${dirty ? ' is-dirty' : ''}`} title={dirty ? 'Unsaved changes' : undefined}><Icon name={isGraph(path) ? 'graph' : fileIconName(path)} size={12} /></span>
       <span className="toptab-text"><span className="top-app filetab-name">{isGraph(path) ? 'Graph' : basename(path)}</span></span>
       {hint && <span className="toptab-key" data-key={hint} />}
       <button className={`toptab-close filetab-close${dirty ? ' is-dirty' : ''}`} {...tip(dirty ? 'Unsaved changes. Close without saving' : 'Close', active ? 'pane.close' : undefined)}
         onMouseDown={(e) => e.stopPropagation()} onClick={close}><Icon name="x" size={11} /></button>
+    </div>
+  );
+}
+
+/** A tab dragged out of another window is over this one: shows where it would land if let go (movein.ts). */
+function Incoming() {
+  const [over, setOver] = useState<Over | null>(null);
+  useEffect(() => bus.on('tearhover', (o: Over | null) => setOver(o && Number.isFinite(o.x) && Number.isFinite(o.y) ? o : null)), []);
+  // The window may be behind another and get no word that the tab has gone: a tab that stops moving for long is taken as gone.
+  useEffect(() => { if (!over) return; const t = window.setTimeout(() => setOver(null), 15000); return () => window.clearTimeout(t); }, [over]);
+  const land: Landing | null = over ? landing(over) : null;
+  const block = land?.kind === 'join' && land.block ? land.tab : null;
+  useEffect(() => {
+    const el = block ? document.querySelector<HTMLElement>(`.tab-group[data-tab="${block}"]`) : null;
+    el?.classList.add('is-target');
+    return () => el?.classList.remove('is-target');
+  }, [block]);
+  if (!over || !land) return null;
+  const box = land.kind === 'tab' ? null : land.kind === 'join' && land.block ? null : land.box;
+  return (
+    <div className="incoming">
+      {box && <div className="incoming-box" style={box} />}
+      {land.kind === 'tab' && land.bar && <div className="incoming-bar" style={land.bar} />}
+      <div className="incoming-chip" style={{ left: Math.max(4, Math.min(over.x + 14, window.innerWidth - 250)), top: Math.max(4, Math.min(over.y + 16, window.innerHeight - 30)) }}>
+        <Icon name={over.kind === 'file' ? 'file' : 'terminal'} size={12} /><span>{over.label || (over.kind === 'file' ? 'File' : 'Terminal')}</span>
+      </div>
     </div>
   );
 }
@@ -525,6 +625,7 @@ function Stack() {
         </div>
       )}
       {show === 'both' && spans.cut !== null && <div className="divider is-row area-divider" style={{ left: `${spans.cut}%`, height: '100%' }} onMouseDown={drag} onDoubleClick={() => useStore.getState().setAreaRatio(0.5)} />}
+      <HiddenTerms right={show !== 'editor' && liveTabs ? 100 - term.x - term.w : null} />
     </div>
   );
 }
@@ -585,7 +686,9 @@ function PaneTree({ id: tree, root, activePane, maximized, active, focused }: { 
   const ref = useRef<HTMLDivElement>(null);
   // Panes that are fading out keep their place; the rest are laid out as if they were already gone, so they glide into the space.
   const full = useMemo(() => computeLayout(root), [root]);
-  const liveRoot = useMemo(() => keepLeaves(root, (id) => !leaving[id]) ?? root, [root, leaving]);
+  // Hidden terminals are laid out around in the same way, for as long as they are hidden.
+  const off = leaves(root).filter((id) => isOff(panes[id])).join('\n');
+  const liveRoot = useMemo(() => { const out = new Set(off.split('\n')); return keepLeaves(root, (id) => !leaving[id] && !out.has(id)) ?? root; }, [root, leaving, off]);
   const { panes: rects, dividers } = useMemo(() => computeLayout(liveRoot), [liveRoot]);
   const ids = useMemo(() => leaves(root).slice().sort(), [root]);
   const split = rects.length > 1;
@@ -593,18 +696,32 @@ function PaneTree({ id: tree, root, activePane, maximized, active, focused }: { 
 
   // A pane is moved by its grip: dragged over another pane, it lands against that pane's nearest edge.
   const [moving, setMoving] = useState<{ pane: string; rect: Rect | null } | null>(null);
-  const now = useRef({ rects, root });
-  now.current = { rects, root };
+  const now = useRef({ rects, root: liveRoot });
+  now.current = { rects, root: liveRoot };
   const grab = (id: string) => (e: React.MouseEvent) => {
     if (e.button !== 0) return;
     e.preventDefault();
     const from = { x: e.clientX, y: e.clientY };
     let started = false;
     let drop: ReturnType<typeof dropAt> = null;
+    // A terminal carried up to the row: onto another tab it joins that tab, and onto the row beside the tabs it gets a tab of its own.
+    let row: { tab: string | null; el: HTMLElement } | null = null;
+    const aim = (next: typeof row) => { if (row?.el !== next?.el) { row?.el.classList.remove('is-target'); next?.el.classList.add('is-target'); } row = next; };
     const move = (ev: MouseEvent) => {
       if (!started && Math.hypot(ev.clientX - from.x, ev.clientY - from.y) < 5) return;
       if (!started) { started = true; document.body.classList.add('is-moving-pane'); }
       const { rects, root } = now.current;
+      const bar = tree === EDITORS ? null : document.querySelector('.topbar')?.getBoundingClientRect();
+      if (bar && ev.clientY <= bar.bottom) {
+        const hit = document.elementsFromPoint(ev.clientX, ev.clientY);
+        const block = hit.map((n) => n.closest<HTMLElement>('.tab-group[data-tab]:not(.is-leaving)')).find((n) => !!n);
+        const zone = hit.map((n) => n.closest<HTMLElement>('.zone.is-tabs')).find((n) => !!n);
+        aim(block ? (block.dataset.tab === tree ? null : { tab: block.dataset.tab!, el: block }) : zone ? { tab: null, el: zone } : null);
+        drop = null;
+        setMoving({ pane: id, rect: null });
+        return;
+      }
+      aim(null);
       drop = dropAt(ev.clientX, ev.clientY, ref.current!.getBoundingClientRect(), rects, id);
       // The outline shows exactly where the pane will be.
       const next = drop ? moveLeaf(root, id, drop.target, drop.edge, PREVIEW) : root;
@@ -616,7 +733,10 @@ function PaneTree({ id: tree, root, activePane, maximized, active, focused }: { 
       window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); window.removeEventListener('keydown', key, true);
       document.body.classList.remove('is-moving-pane');
       setMoving(null);
-      if (place && drop) useStore.getState().movePane(id, drop.target, drop.edge);
+      const landed = row;
+      aim(null);
+      if (place && landed) useStore.getState().moveTerm(id, landed.tab);
+      else if (place && drop) useStore.getState().movePane(id, drop.target, drop.edge);
       focusFront();
     };
     const up = () => end(true);
@@ -688,10 +808,11 @@ function PaneTree({ id: tree, root, activePane, maximized, active, focused }: { 
         if (!pane) return null;
         const gone = !!leaving[id];
         const r = maximized && !gone ? { x: 0, y: 0, w: 100, h: 100 } : rectOf(id);
-        const hidden = !gone && maximized && id !== activePane;
+        const away = isOff(pane);
+        const hidden = !gone && (away || (maximized && id !== activePane));
         const isActive = active && focused && id === activePane;
         return (
-          <PaneBox key={id} id={id} isActive={isActive} split={split} leaving={gone} offset={enterOffset(root, id)}
+          <PaneBox key={id} id={id} isActive={isActive} split={split} leaving={gone} away={away} offset={enterOffset(root, id)}
             moving={moving?.pane === id} onGrab={split && !maximized && !gone ? grab(id) : undefined}
             style={{ left: `${r.x}%`, top: `${r.y}%`, width: `${r.w}%`, height: `${r.h}%`, visibility: hidden ? 'hidden' : undefined }}>
             {pane.kind === 'terminal' ? <TerminalPane pane={pane} active={isActive || !split} /> : <EditorPane pane={pane} active={isActive || !split} />}
@@ -714,17 +835,104 @@ function paneMin(id: string) {
   return { w: 48, h: Math.ceil(useStore.getState().settings.fontSize * 1.55) + 43 };
 }
 
-function PaneBox({ id, isActive, split, leaving, moving, onGrab, offset, style, children }: {
-  id: string; isActive: boolean; split: boolean; leaving: boolean; moving: boolean; onGrab?: (e: React.MouseEvent) => void;
+function PaneBox({ id, isActive, split, leaving, away, moving, onGrab, offset, style, children }: {
+  id: string; isActive: boolean; split: boolean; leaving: boolean; /** A hidden terminal. */ away: boolean; moving: boolean; onGrab?: (e: React.MouseEvent) => void;
   offset?: React.CSSProperties; style: React.CSSProperties; children: React.ReactNode;
 }) {
-  const [entering, entered] = useEntering();
+  const [made, entered] = useEntering();
+  // A hidden terminal brought back comes in as a new one does.
+  const [back, setBack] = useState(false);
+  const was = useRef(away);
+  useLayoutEffect(() => { if (was.current && !away && !reducedMotion()) setBack(true); was.current = away; }, [away]);
+  const entering = made || back;
   return (
     <div className={`pane${isActive ? ' is-active' : ''}${split ? ' is-split' : ''}${entering ? ' is-entering' : ''}${leaving ? ' is-leaving' : ''}${moving ? ' is-moving' : ''}`} data-pane={id}
-      style={entering ? { ...style, ...offset } : style} onAnimationEnd={entered}
+      style={entering ? { ...style, ...offset } : style} onAnimationEnd={(e) => { entered(e); if (e.target === e.currentTarget) setBack(false); }}
       onMouseDownCapture={() => { if (!isActive) { useStore.getState().focusPane(id); requestAnimationFrame(() => paneHandles.get(id)?.focus()); } }}>
       {children}
       {onGrab && <div className="pane-grip" {...tip('Drag to move this pane')} onMouseDown={onGrab} />}
+    </div>
+  );
+}
+
+/** The terminals taken off screen with ⌘U: a chip in the bottom right corner of the terminals, there while any are
+ *  hidden, that opens the list of them. A click on one brings it back to its place; ⇧⌘U brings them all back.
+ *  `right`: how far the terminals' right edge is from the window's, in percent; null while no terminal is on screen,
+ *  when the chip waits in the bottom left corner instead, clear of the editor's own corner. */
+function HiddenTerms({ right }: { right: number | null }) {
+  const panes = useStore((s) => s.panes);
+  const list = useMemo(() => hiddenTerms({ panes }), [panes]);
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => { if (!list.length) setOpen(false); }, [list.length]);
+  // A click anywhere else, or Esc, puts the list away.
+  useEffect(() => {
+    if (!open) return;
+    const press = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(false); };
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setOpen(false); focusFront(); } };
+    window.addEventListener('mousedown', press, true); window.addEventListener('keydown', key, true);
+    return () => { window.removeEventListener('mousedown', press, true); window.removeEventListener('keydown', key, true); };
+  }, [open]);
+  if (!list.length) return null;
+  // A command is running there and is not waiting for you: an agent at work, say. Its terminal mark pulses.
+  const working = (p: TermPane) => p.running && !p.waiting;
+  const show = (id: string) => { useStore.getState().showTerm(id); focusFront(); };
+  return (
+    <div className={`hidden-terms${right === null ? ' is-apart' : ''}`} ref={ref} style={right === null ? { left: 12 } : { right: `calc(${right}% + 14px)` }}>
+      {open && (
+        <div className="hidden-pop" role="menu" aria-label="Hidden terminals">
+          <div className="hidden-head">Hidden terminals, still running</div>
+          {list.map((p) => {
+            const l = termLabel(p);
+            return (
+              <button key={p.id} className="hidden-row" role="menuitem" data-pane={p.id} title={`Bring back ${l.dir} ${l.app}`} onClick={() => show(p.id)}>
+                <span className={`hidden-mark${working(p) ? ' is-working' : ''}`}><Icon name="terminal" size={13} /></span>
+                <span className="hidden-name"><span className="top-dir">{l.dir ? `${l.dir} ` : ''}</span><span className="top-app">{l.app}</span></span>
+              </button>
+            );
+          })}
+          <button className="hidden-row hidden-all" role="menuitem" onClick={() => runCommand('term.showAll')}><span>Bring all back</span><kbd>{formatKeys('cmd+shift+u')}</kbd></button>
+        </div>
+      )}
+      <button className="hidden-chip" aria-expanded={open} {...tip('Hidden terminals. Bring them all back', 'term.showAll')} onClick={() => { setOpen(!open); if (open) focusFront(); }}>
+        <span className={`hidden-mark${list.some(working) ? ' is-working' : ''}`}><Icon name="terminal" size={13} /></span>{list.length} hidden
+      </button>
+    </div>
+  );
+}
+
+/** How often a window looks at the source folder for something newer than itself. */
+const UPDATE_POLL = 2500;
+/** A notice at the top middle of the window once the folder this copy was built from holds something newer: it is the way to
+ *  update (no key does it). Closing it puts it away until the folder next goes from matching to changed, or
+ *  the change grows from one a reload brings in to one that needs a relaunch. */
+function UpdateNotice() {
+  const [pending, setPending] = useState<'reload' | 'relaunch' | null>(null);
+  const [hidden, setHidden] = useState(false);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let live = true;
+    const look = async () => {
+      if (document.visibilityState !== 'visible') return;
+      const status = await api.app.checkUpdate().catch(() => null);
+      if (!live || !status || status === 'busy') return;
+      setPending(status === 'reload' || status === 'relaunch' ? status : null);
+    };
+    void look();
+    const timer = window.setInterval(look, UPDATE_POLL);
+    const offFocus = api.app.onFocus((on) => { if (on) void look(); });
+    return () => { live = false; window.clearInterval(timer); offFocus?.(); };
+  }, []);
+  useEffect(() => { setHidden(false); }, [pending]);
+  if (!pending || hidden) return null;
+  const relaunch = pending === 'relaunch';
+  const go = async () => { setBusy(true); try { await updateApp(); } finally { setBusy(false); } };
+  return (
+    <div className="update-notice" role="status">
+      <span className="update-dot" />
+      <span>Astrolabe has been updated</span>
+      <button className="update-go" disabled={busy} onClick={go}>{relaunch ? 'Relaunch' : 'Reload'}</button>
+      <button className="update-x" aria-label="Dismiss" onClick={() => setHidden(true)}><Icon name="x" size={11} /></button>
     </div>
   );
 }
@@ -736,5 +944,5 @@ function Toast() {
     const t = window.setTimeout(() => { if (useStore.getState().toast?.n === toast.n) useStore.setState({ toast: null }); }, toast.ms ?? 1800);
     return () => window.clearTimeout(t);
   }, [toast?.n]);
-  return toast ? <div className="toast" role="status" key={toast.n}>{toast.text}</div> : null;
+  return toast ? <div className={`toast${toast.top ? ' is-top' : ''}`} role="status" key={toast.n}>{toast.text}</div> : null;
 }

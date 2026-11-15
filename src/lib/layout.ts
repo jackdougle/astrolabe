@@ -83,13 +83,17 @@ function sameShape(a: LayoutNode, b: LayoutNode): boolean {
   return a.dir === b.dir && sameShape(a.a, b.a) && sameShape(a.b, b.b);
 }
 
-/** Puts a pane that is not in the tree yet against one edge of `target`, sharing its space half and half
+/** Puts an arrangement that is not in the tree yet against one edge of `target`, sharing its space half and half
  *  (against that edge of the whole tree when `target` is null). */
-export function addLeaf(root: LayoutNode, pane: string, target: string | null, edge: Edge, id: string): LayoutNode {
-  const added: LayoutNode = { type: 'leaf', pane };
+export function addNode(root: LayoutNode, added: LayoutNode, target: string | null, edge: Edge, id: string): LayoutNode {
   const first = edge === 'left' || edge === 'top';
   const beside = (n: LayoutNode): LayoutNode => ({ type: 'split', id, dir: edge === 'left' || edge === 'right' ? 'row' : 'col', ratio: 0.5, a: first ? added : n, b: first ? n : added });
   return target ? replaceLeaf(root, target, beside) : beside(root);
+}
+
+/** Puts a pane that is not in the tree yet against one edge of `target` (see `addNode`). */
+export function addLeaf(root: LayoutNode, pane: string, target: string | null, edge: Edge, id: string): LayoutNode {
+  return addNode(root, { type: 'leaf', pane }, target, edge, id);
 }
 
 /** Takes `pane` out of the tree and puts it against one edge of `target` (see `addLeaf`).

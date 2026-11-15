@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, basename } from '../lib/api';
-import { commands, formatKeys } from '../lib/commands';
+import { commands, formatKeys, hotkeys } from '../lib/commands';
 import { applyHeadingFont, applyNotesFont, FontInfo, googleFonts, loadGoogleFont, SYSTEM } from '../lib/fonts';
 import { fuzzyFilter } from '../lib/fuzzy';
 import { history, MONO, setMonacoTheme } from '../lib/monaco';
@@ -24,6 +24,7 @@ const PLACEHOLDER: Record<PaletteMode, string> = {
   fonts: 'Which font',
   sizes: 'Font and navigator sizes',
   behaviour: 'Editing, terminal and session options',
+  keys: 'Hotkeys: type to search (Enter runs one)',
 };
 
 // Escape steps back to the menu a mode was opened from; the top-level modes close.
@@ -178,6 +179,18 @@ function PaletteBody({ initial }: { initial: PaletteMode }) {
             if (!ok) { useStore.getState().showToast(`Could not load ${family}. Check your connection.`); return; }
             if (code) (await import('../lib/termSession')).allSessions().forEach((x) => x.applyAppearance());
           });
+        },
+      }));
+    }
+    if (mode === 'keys') {
+      // Every hotkey. A row that is a command runs it, when it can run where you are.
+      return fuzzyFilter(query, hotkeys(), (k) => k.title, 200).map((h, i) => ({
+        key: h.item.id ?? `key${i}:${h.item.title}`, label: h.item.title, positions: h.positions, hint: h.item.keys,
+        run: () => {
+          const c = h.item.id ? commands.find((x) => x.id === h.item.id) : undefined;
+          if (!c || (c.when && !c.when())) return;
+          close(false); c.run();
+          if (!useStore.getState().palette) { const id = focusedId(); if (id && c.id !== 'sidebar.search') focusPane(id); }
         },
       }));
     }

@@ -1,7 +1,8 @@
 // The faint traces that run out from a note's title: lines laid out as the copper on a circuit board is, on a grid,
-// turning only by 45 degrees, leaving the title as the pins of a chip do (from the edge of the words' own shape,
-// made a little bigger: never from inside a letter, nor from a box round the title), running leftwards and
-// downwards in parallel bundles that peel apart, with only short stubs over the top and off the right-hand end, and ending in vias and pads. They are drawn for each file from its name, so a file keeps its own pattern,
+// turning only by 45 degrees, leaving the title as the pins of a chip do (each from the edge of a letter, at a part
+// of it that stands out towards the line: never from inside a letter, nor from a box round the title), running
+// leftwards and downwards in parallel bundles that peel apart, with only short stubs over the top and off the
+// right-hand end, and ending in vias and small terminals. They are drawn for each file from its name, so a file keeps its own pattern,
 // and they thin out and cool in colour as they leave the word. They keep out of the note's text line by line, so
 // they find their way into whatever a note leaves open: above it, in its margins, past the ends of its short lines.
 export interface Box { left: number; top: number; right: number; bottom: number }
@@ -43,18 +44,21 @@ function random(seed: string) {
 /** `off`: the step is a jog to one side of this heading, and may be taken to the other side when that is where the room is. */
 interface Step { dir: number; len: number; off?: number }
 /** `from`: where the line meets its letter, when that is not the middle of its first cell. */
-interface Trace { cells: [number, number][]; end: 'via' | 'pad' | 'fade'; pulse: number; from?: [number, number] }
+interface Trace { cells: [number, number][]; end: 'via' | 'pin' | 'fade'; pulse: number; from?: [number, number] }
 
 const INK = 96; // how opaque a pixel has to be to count
-const PAD = 4; // the clear space kept round the letters, in pixels: the lines start at its edge
+const PAD = 4; // the clear space a line keeps from the letters it runs past, in pixels
+const GAP = 1.5; // the hairline left between a letter and the line that starts at it
 const CLOSE = 9; // hollows and gaps narrower than about twice this are filled in: the inside of an n, the space between two letters
-const REACH_IN = 5; // how many cells a line from the side crosses to reach the word: further, and it reads as a rule over it
-interface Ink { x0: number; y0: number; w: number; h: number; alpha: Uint8Array }
+const NEAR = 10; // a line lands on a letter only where nothing within this far to either side of it...
+const DEEP = 6; // ...stands out this much further towards it: otherwise it would run in beside or over a letter to get there
+/** `alpha`: the shape no line runs through. `tight`: the letters themselves, with a hairline round them, which the lines start at. */
+interface Ink { x0: number; y0: number; w: number; h: number; alpha: Uint8Array; tight: Uint8Array }
 let inkCache: { key: string; ink: Ink | null } | null = null;
-/** The shape the lines start from and never enter: the title's words as the page draws them, made a little bigger
- *  all round (so that the shape follows their curves at a small distance) with the hollows in and between the
- *  letters filled, so that no line runs up inside one. A pixel is 255 inside it and 0 outside, over a stretch of
- *  the grid that starts at (x0, y0). Null when there is nothing to draw. */
+/** The title's words as the page draws them, twice over. `tight` is the letters with a hairline round them: a line
+ *  starts at its edge. `alpha` is the shape the lines keep out of as they run: the letters made a little bigger all
+ *  round, with the hollows in and between them filled, so that no line runs up inside one. A pixel is 255 inside
+ *  and 0 outside, over a stretch of the grid that starts at (x0, y0). Null when there is nothing to draw. */
 function inkOf(scene: WireScene): Ink | null {
   const g = scene.glyphs;
   if (!g || !g.text.trim()) return null;
@@ -109,7 +113,10 @@ function inkOf(scene: WireScene): Ink | null {
     const near = grown(PAD - 1);
     const alpha = new Uint8Array(w * h);
     for (let i = 0; i < alpha.length; i++) alpha[i] = closed[i] || near[i] ? 255 : 0;
-    return { x0, y0, w, h, alpha };
+    const hair = grown(GAP);
+    const tight = new Uint8Array(w * h);
+    for (let i = 0; i < tight.length; i++) tight[i] = hair[i] ? 255 : 0;
+    return { x0, y0, w, h, alpha, tight };
   })();
   inkCache = { key, ink: made };
   return made;
@@ -235,7 +242,8 @@ function layOut(scene: WireScene, ink: Ink | null): Trace[] {
     }
     if (cells.length < least) return null; // too short to read as a line: left out (its cells stay taken, which only keeps others clear of the title)
     const kind = rand();
-    return { cells, end: kind < 0.45 ? 'via' : kind < 0.65 ? 'pad' : 'fade', pulse: rand() < 0.4 ? 0.12 + rand() * 0.45 : -1 };
+    // A terminal only on a short line: at the far end of a long one, which has faded by then, it reads as a stray dash.
+    return { cells, end: kind < 0.45 ? 'via' : kind < 0.65 && cells.length <= 9 ? 'pin' : 'fade', pulse: rand() < 0.4 ? 0.12 + rand() * 0.45 : -1 };
   };
   /** A way of snaking along a heading: straight runs with 45-degree jogs to one side or the other, and now and then a longer drift. */
   const snake = (rand: () => number, heading: number, total: number, lean: number): Step[] => {
@@ -256,40 +264,45 @@ function layOut(scene: WireScene, ink: Ink | null): Trace[] {
   };
 
   const traces: Trace[] = [];
-  const inner = new Uint8Array(cols * rows); // cells of the title's block that a line crosses to reach its letter
-  /** The way in from the cell (c, r) at the block's edge, going `dir`, to the nearest letter: the cells crossed,
-   *  the one against the letter first. Null when there is no letter within `max` cells, or another line's way in
-   *  lies across it. With no letters to go by, a line starts at the edge. */
-  const lead = (c: number, r: number, dir: number, max: number): [number, number][] | null => {
-    if (!lettered) return [];
-    const cells: [number, number][] = [];
-    for (let k = 0; k <= max; k++) {
-      if (c < c0 || c > c1 || r < r0 || r > r1) return null;
-      if (inked[r * cols + c]) return cells.reverse();
-      if (inner[r * cols + c]) return null;
-      cells.push([c, r]);
-      c += DX[dir]; r += DY[dir];
+  /** How far a straight line coming in along `dir` (E, S, W or N) goes before it meets a letter, from the edge of
+   *  the letters' patch: `at` is its y when it runs across and its x when it runs up or down. -1 when it meets none. */
+  const meet = (at: number, dir: number) => {
+    if (!ink) return -1;
+    const across = dir === E || dir === W;
+    const n = across ? ink.w : ink.h;
+    const p = Math.floor(at - (across ? ink.y0 : ink.x0));
+    if (p < 0 || p >= (across ? ink.h : ink.w)) return -1;
+    for (let k = 0; k < n; k++) {
+      const q = dir === E || dir === S ? k : n - 1 - k;
+      if (ink.tight[across ? p * ink.w + q : q * ink.w + p]) return k;
     }
-    return null;
+    return -1;
   };
-  /** Where a line that starts in the cell (c, r), with its letter in the direction `dir`, meets that letter. */
-  const touch = (c: number, r: number, dir: number): [number, number] | undefined => {
-    if (!ink) return undefined;
-    const x = (c + 0.5) * PITCH, y = (r + 0.5) * PITCH;
-    for (let k = 1; k <= PITCH * 2; k++) {
-      const px = Math.round(x + DX[dir] * k - ink.x0), py = Math.round(y + DY[dir] * k - ink.y0);
-      if (px < 0 || py < 0 || px >= ink.w || py >= ink.h) break;
-      if (ink.alpha[py * ink.w + px] > INK) return [x + DX[dir] * (k - 1), y + DY[dir] * (k - 1)];
+  /** Where a line coming in along `dir` lands on a letter: the point on the letter's edge. Null when there is no
+   *  letter in its way, or it would have to pass close beside or over a part of the word to reach one (a hollow, the
+   *  space under an overhang, a tall letter beyond a short one): a line lands only on what stands out towards it. */
+  const landing = (at: number, dir: number): [number, number] | null => {
+    const d = meet(at, dir);
+    if (d < 0 || !ink) return null;
+    for (let off = 2; off <= NEAR; off += 2) for (const side of [-off, off]) {
+      const o = meet(at + side, dir);
+      if (o >= 0 && o < d - DEEP) return null;
+      if (off === 2 && (o < 0 || o > d + 3)) return null; // it would only graze the side of something: a line lands squarely
     }
-    return undefined;
+    if (dir === E) return [ink.x0 + d - 0.5, at];
+    if (dir === W) return [ink.x0 + ink.w - d + 0.5, at];
+    if (dir === S) return [at, ink.y0 + d - 0.5];
+    return [at, ink.y0 + ink.h - d + 0.5];
   };
-  /** Keeps a line that was laid from the pin cell (c, r), with its way in to the letter that lies `dir` of it. */
-  const add = (made: Trace | null, way: [number, number][], c: number, r: number, dir: number) => {
+  const inner = new Uint8Array(cols * rows); // cells a line crosses between its letter and the open ground
+  const clear = (way: [number, number][]) => way.every(([c, r]) => !inner[r * cols + c] && !taken[r * cols + c]);
+  /** Keeps a line that was laid, with the cells between it and its letter (the one against the letter first) and
+   *  the point on the letter's edge that it starts at. */
+  const add = (made: Trace | null, way: [number, number][], from?: [number, number]) => {
     if (!made) return;
     for (const [wc, wr] of way) { inner[wr * cols + wc] = 1; taken[wr * cols + wc] = 1; }
-    const [fc, fr] = way[0] ?? [c, r];
     made.cells = [...way, ...made.cells];
-    made.from = touch(fc, fr, dir);
+    made.from = from;
     traces.push(made);
   };
   const reach = Math.max(18, Math.floor(Math.min(scene.width * 0.6, 640) / PITCH));
@@ -307,8 +320,12 @@ function layOut(scene: WireScene, ink: Ink | null): Trace[] {
       const stagger = pick(2, 5) * (rand() < 0.5 ? 1 : -1);
       for (let k = 0; k < size && r <= r1; k++, r++) {
         if (rand() < 0.12) continue;
-        const way = lead(c0, r, E, REACH_IN);
-        if (way) add(run(c0 - 1, r, plan, Math.max(6, length + stagger * k), rng(`l${r - r0}`)), way, c0 - 1, r, E);
+        if (!lettered) { add(run(c0 - 1, r, plan, Math.max(6, length + stagger * k), rng(`l${r - r0}`)), []); continue; }
+        const land = landing((r + 0.5) * PITCH, E);
+        if (!land) continue;
+        const way: [number, number][] = [];
+        for (let c = Math.floor((land[0] - 1.5) / PITCH - 0.5); c >= c0; c--) way.push([c, r]); // the cells whose middles are short of the letter
+        if (clear(way)) add(run(c0 - 1, r, plan, Math.max(6, length + stagger * k), rng(`l${r - r0}`)), way, land);
       }
       if (rand() < 0.35) r += 1;
     }
@@ -320,7 +337,12 @@ function layOut(scene: WireScene, ink: Ink | null): Trace[] {
   {
     const rand = rng('bottom');
     const pick = picker(rand);
-    const open = (c: number) => { for (let k = 1; k <= 5; k++) if (!free(c, r1 + k)) return false; return true; };
+    // Room means room: five cells down, and by then two to either side, not a sliver between the text and the margin.
+    const open = (c: number) => {
+      for (let k = 1; k <= 5; k++) if (!free(c, r1 + k)) return false;
+      for (let k = 3; k <= 5; k++) for (const side of [-2, -1, 1, 2]) if (closed(c + side, r1 + k) && c + side <= wall) return false;
+      return true;
+    };
     for (let c = c0 + 1; c <= c1 - 1;) {
       const size = pick(1, 3);
       const plan: Step[] = [{ dir: S, len: pick(2, 5) }, ...snake(rand, S, 70, 0)];
@@ -328,8 +350,12 @@ function layOut(scene: WireScene, ink: Ink | null): Trace[] {
       const stagger = pick(2, 5) * (rand() < 0.5 ? 1 : -1);
       for (let k = 0; k < size && c <= c1 - 1; k++, c++) {
         if (rand() < 0.15 || !open(c)) continue;
-        const way = lead(c, r1, N, rows);
-        if (way) add(run(c, r1 + 1, plan, Math.max(6, length + stagger * k), rng(`b${c - c0}`)), way, c, r1 + 1, N);
+        if (!lettered) { add(run(c, r1 + 1, plan, Math.max(6, length + stagger * k), rng(`b${c - c0}`)), []); continue; }
+        const land = landing((c + 0.5) * PITCH, N);
+        if (!land) continue;
+        const way: [number, number][] = [];
+        for (let r = Math.ceil((land[1] + 1.5) / PITCH - 0.5); r <= r1; r++) way.push([c, r]);
+        if (clear(way)) add(run(c, r1 + 1, plan, Math.max(6, length + stagger * k), rng(`b${c - c0}`)), way, land);
       }
       c += pick(2, 6);
     }
@@ -344,10 +370,14 @@ function layOut(scene: WireScene, ink: Ink | null): Trace[] {
     const pick = picker(own);
     if (own() < 0.55) continue;
     const plan: Step[] = [{ dir: N, len: 1 }, { dir: 5, len: 1 }, ...(own() < 0.5 ? [{ dir: W, len: pick(1, 3) }] : [])];
-    let top = r0;
-    while (top <= r1 && lettered && !inked[top * cols + c]) top++;
-    if (top > r1) continue; // between two words
-    add(run(c, top - 1, plan, 6, own, 3), [], c, top - 1, S);
+    if (!lettered) { add(run(c, r0 - 1, plan, 6, own, 3), []); continue; }
+    const land = landing((c + 0.5) * PITCH, S);
+    if (!land) continue; // between two words, or beside a taller letter
+    // From the letter's top up to the first cell clear of the words' shape, and on from there.
+    const way: [number, number][] = [];
+    let row = Math.floor((land[1] - 1.5) / PITCH - 0.5);
+    while (row > 1 && inked[row * cols + c] && way.length < 3) way.push([c, row--]);
+    if (clear(way)) add(run(c, row, plan, 6, own, 3), way, land);
   }
   if (room >= 2) {
     for (let r = r0; r <= r1; r++) {
@@ -355,10 +385,13 @@ function layOut(scene: WireScene, ink: Ink | null): Trace[] {
       const pick = picker(own);
       if (own() < 0.45) continue;
       const plan: Step[] = [{ dir: E, len: pick(1, 2) }, { dir: 1, len: pick(1, 2) }, ...(own() < 0.4 ? [{ dir: S, len: pick(1, 2) }] : [])];
-      let end = c1;
-      while (end >= c0 && lettered && !inked[r * cols + end]) end--;
-      if (end < c0 || c1 - end > REACH_IN) continue; // the last letter has nothing at this height
-      add(run(end + 1, r, plan, 6, own, 3), [], end + 1, r, W);
+      if (!lettered) { add(run(c1 + 1, r, plan, 6, own, 3), []); continue; }
+      const land = landing((r + 0.5) * PITCH, W);
+      if (!land) continue; // the last letter has nothing at this height
+      const way: [number, number][] = [];
+      let col = Math.ceil((land[0] + 1.5) / PITCH - 0.5);
+      while (col < cols - 1 && inked[r * cols + col] && way.length < 3) way.push([col++, r]);
+      if (clear(way)) add(run(col, r, plan, 6, own, 3), way, land);
     }
   }
   stub = false;
@@ -411,14 +444,15 @@ export function drawWires(canvas: HTMLCanvasElement, scene: WireScene) {
     const [px, py] = points[1];
     const ang = Math.atan2(py - y0, px - x0);
     ctx.save(); ctx.translate(x0, y0); ctx.rotate(ang); ctx.fillRect(-0.4, -1, 3.4, 2); ctx.restore();
-    // Where it stops: a via (a ring with its hole), a pad, or nothing.
+    // Where it stops: a via (a ring with its hole), a terminal like the one it starts with, or nothing.
     if (trace.end === 'via') {
       ctx.lineWidth = 1.1;
       ctx.beginPath(); ctx.arc(x1, y1, 2.3, 0, Math.PI * 2); ctx.stroke();
-    } else if (trace.end === 'pad') {
+    } else if (trace.end === 'pin') {
       const [bx, by] = points[points.length - 2];
       ctx.save(); ctx.translate(x1, y1); ctx.rotate(Math.atan2(y1 - by, x1 - bx));
-      ctx.beginPath(); ctx.roundRect(-0.5, -1.9, 5.2, 3.8, 1); ctx.fill(); ctx.restore();
+      ctx.fillStyle = `rgba(${scene.near}, ${A * 0.55})`;
+      ctx.fillRect(-0.4, -1, 3.4, 2); ctx.restore();
     }
     // A stretch of some lines is lit, as if something were passing along it: bright in its middle, gone at its ends.
     if (trace.pulse >= 0 && points.length > 8) {
@@ -432,12 +466,12 @@ export function drawWires(canvas: HTMLCanvasElement, scene: WireScene) {
       path(lit); ctx.stroke();
     }
   }
-  // Nothing is left inside the words' shape: not the soft edge of a line, nor its bloom.
+  // Nothing is left on the letters themselves: not the soft edge of a line, nor its bloom.
   if (letters) {
     const stamp = document.createElement('canvas');
     stamp.width = letters.w; stamp.height = letters.h;
     const image = new ImageData(letters.w, letters.h);
-    for (let i = 0; i < letters.alpha.length; i++) image.data[i * 4 + 3] = letters.alpha[i];
+    for (let i = 0; i < letters.tight.length; i++) image.data[i * 4 + 3] = letters.tight[i];
     stamp.getContext('2d')!.putImageData(image, 0, 0);
     ctx.save();
     ctx.globalCompositeOperation = 'destination-out';

@@ -137,6 +137,19 @@ body.is-resizing .zone { transition: none; }
 /* A tab being dragged stays under the pointer, above the rest, while the tabs it passes slide out of its way. */
 .is-dragging { z-index: 50; pointer-events: none; cursor: grabbing; }
 .tab-group.is-dragging, .toptab.filetab.is-dragging { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, var(--line)), 0 6px 18px rgb(0 0 0 / 0.4); background: var(--surface); }
+/* Dragged out of the window: it waits in its place, faint, while an outline out there shows the window it would become. */
+.tab-group.is-dragging.is-torn, .toptab.filetab.is-dragging.is-torn { opacity: 0.35; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, var(--line)); }
+/* A tab, or a terminal carried up from below, would join this one if let go. The tab that would join it draws in. */
+.tab-group.is-target { box-shadow: inset 0 0 0 1.5px var(--accent), 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); background: color-mix(in srgb, var(--accent) 16%, var(--surface)); }
+.tab-group.is-dragging.is-joining { opacity: 0.8; scale: 0.9; transition: scale 0.14s var(--ease-out), opacity 0.14s; }
+/* A terminal carried up to the row beside the tabs would get a tab of its own. */
+.zone.is-tabs.is-target { background: color-mix(in srgb, var(--accent) 9%, transparent); box-shadow: inset 0 -1.5px 0 var(--accent); }
+/* A tab dragged out of another window, over this one: where it would land (movein.ts). */
+.incoming { position: fixed; inset: 0; z-index: 90; pointer-events: none; box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 70%, transparent); border-radius: 10px; }
+.incoming-box { position: fixed; border: 1.5px solid var(--accent); border-radius: var(--radius); background: color-mix(in srgb, var(--accent) 14%, transparent); transition: left 0.1s var(--ease-out), top 0.1s var(--ease-out), width 0.1s var(--ease-out), height 0.1s var(--ease-out); }
+.incoming-bar { position: fixed; border-radius: 1px; background: var(--accent); box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 70%, transparent); transition: left 0.1s var(--ease-out); }
+.incoming-chip { position: fixed; max-width: 240px; height: 24px; padding: 0 9px; display: flex; align-items: center; gap: 7px; border-radius: 7px; background: var(--surface); color: var(--text); font: 11.5px var(--mono); white-space: nowrap; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, var(--line)), 0 6px 18px rgb(0 0 0 / 0.4); }
+.incoming-chip > span { overflow: hidden; text-overflow: ellipsis; }
 /* Taken out of the row, on its way to a pane. */
 .toptab.filetab.is-away { opacity: 0.85; }
 body.is-dragging-tab { cursor: grabbing; }
@@ -231,7 +244,12 @@ body.is-moving-pane .stack { pointer-events: none; }
 .tree-drag { position: fixed; z-index: 70; left: 0; top: 0; max-width: 260px; pointer-events: none; padding: 2px 8px; border-radius: 5px; background: var(--surface-hi); border: 1px solid var(--line); box-shadow: 0 6px 18px rgb(0 0 0 / 0.3); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pane.is-file-drop::after { content: ""; position: absolute; inset: 3px; z-index: 8; pointer-events: none; border: 1.5px solid var(--accent); border-radius: var(--radius); background: color-mix(in srgb, var(--accent) 12%, transparent); }
 body.is-dragging-files, body.is-dragging-files * { cursor: grabbing !important; }
-.tree-arrow { flex: none; width: 14px; display: grid; place-items: center; color: var(--faint); transition: transform 0.1s; }
+.tree-arrow { flex: none; width: 14px; display: grid; place-items: center; color: var(--faint); transition: transform var(--exit) var(--ease-out); }
+.tree-arrow.is-open { transition-duration: var(--enter); }
+/* What a row folds away (`Fold` in Sidebar.tsx): a folder's rows drop down from under it as it opens, and draw back up as it closes, a little quicker. The row of the grid goes from no height to the rows' own, which pushes what is below along with it. */
+.tree-kids { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows var(--exit) ease-in-out, opacity var(--exit) ease-in; }
+.tree-kids.is-open { grid-template-rows: 1fr; opacity: 1; transition: grid-template-rows var(--enter) var(--ease-out), opacity var(--enter) ease-out; }
+.tree-kids > div { min-height: 0; overflow-y: clip; }
 .tree-arrow.is-open { transform: rotate(90deg); }
 .tree-name { overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
 .tree-name.is-dir { color: var(--text); }
@@ -268,6 +286,8 @@ body.is-dragging-files, body.is-dragging-files * { cursor: grabbing !important; 
 .term-host { position: absolute; inset: 0; }
 .term-host .xterm { height: 100%; padding: 8px 2px 0 20px; }
 .term-host .xterm-viewport { background: transparent !important; }
+/* The underline of a hovered link, along its pieces on rows other than the pointer's (termSession.ts). */
+.term-link-line { position: absolute; z-index: 6; height: 1px; pointer-events: none; }
 
 .blk-layer { position: absolute; left: 0; right: 0; overflow: hidden; pointer-events: none; z-index: 3; }
 .blk { position: absolute; left: 0; right: 0; top: 0; }
@@ -350,11 +370,36 @@ body.is-dragging-files, body.is-dragging-files * { cursor: grabbing !important; 
 .crumbs:hover { color: var(--dim); }
 .editor-body { position: relative; flex: 1; min-height: 0; outline: 0; }
 .editor-host { position: absolute; inset: 0; }
-/* When the editor fills the tab, a note sits in a column in the middle. The raw column is wider by its line numbers, so the text starts where the rendered text does. */
-.editor-pane.is-centered .editor-host.is-note { left: max(0px, calc(50% - 25rem)); right: auto; width: min(100%, 50rem); }
-.editor-pane.is-centered :is(.rich-head, .rich-note, .milkdown) { margin-left: auto; margin-right: auto; }
+/* A note sits in a column in the middle of its editor, however wide the editor is: alone in the tab, beside a terminal, or one of several editors of any widths. The raw column is wider by its line numbers, so the text starts where the rendered text does. */
+.editor-pane .editor-host.is-note { left: max(0px, calc(50% - 25rem)); right: auto; width: min(100%, 50rem); }
+.editor-pane :is(.rich-head, .rich-note, .milkdown) { margin-left: auto; margin-right: auto; }
 .editor-error { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--dim); padding: 24px; text-align: center; }
 .editor-error p { margin: 0; max-width: 34em; }
+/* The counter in the bottom right corner of a note or a text file, and what a click on it opens (WordCount in EditorPane.tsx). It keeps clear of the scrollbar. */
+.counts { position: absolute; right: 14px; bottom: 6px; z-index: 6; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; font-size: 11px; font-variant-numeric: tabular-nums; pointer-events: none; }
+.counts > * { pointer-events: auto; }
+.counts-chip { padding: 2px 7px; border-radius: 5px; color: var(--faint); background: color-mix(in srgb, var(--bg-deep) 82%, transparent); white-space: nowrap; }
+.counts-chip:hover, .counts-chip[aria-expanded="true"] { color: var(--text); background: var(--surface); }
+.counts-pop { display: grid; grid-template-columns: auto auto; gap: 4px 9px; padding: 9px 13px 10px 11px; border-radius: 8px; background: var(--surface); border: 1px solid var(--line); box-shadow: 0 6px 20px rgb(0 0 0 / 0.28); color: var(--dim); white-space: nowrap; transform-origin: 100% 100%; animation: counts-in 0.12s var(--ease-out); }
+.counts-pop b { text-align: right; font-weight: 600; color: var(--text); }
+.counts-head { grid-column: 1 / -1; color: var(--faint); font-size: 10.5px; letter-spacing: 0.04em; }
+.counts-head:not(:first-child) { margin-top: 5px; }
+@keyframes counts-in { from { opacity: 0; transform: translateY(3px); } }
+/* Terminals taken off screen with ⌘U: a chip in the bottom right corner of the terminals, and the list it opens. */
+.hidden-terms { position: absolute; bottom: 7px; z-index: 9; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; font-size: 11px; pointer-events: none; transition: right var(--enter) var(--ease-out); }
+.hidden-terms.is-apart { align-items: flex-start; }
+.hidden-terms > * { pointer-events: auto; }
+.hidden-chip { display: flex; align-items: center; gap: 6px; padding: 2px 8px 2px 7px; border-radius: 5px; color: var(--dim); background: color-mix(in srgb, var(--bg-deep) 88%, transparent); box-shadow: inset 0 0 0 1px var(--line); white-space: nowrap; font-variant-numeric: tabular-nums; animation: counts-in 0.14s var(--ease-out); }
+.hidden-chip:hover, .hidden-chip[aria-expanded="true"] { color: var(--text); background: var(--surface); }
+/* The terminal mark is still, and glows and pulses only while a command is at work in a hidden terminal. */
+.hidden-mark { flex: none; display: grid; place-items: center; }
+.hidden-mark.is-working { color: var(--neon); filter: drop-shadow(0 0 3px var(--neon)) drop-shadow(0 0 6px color-mix(in srgb, var(--neon) 60%, transparent)); animation: pulse 1.6s ease-in-out infinite; }
+.hidden-pop { display: flex; flex-direction: column; min-width: 200px; max-width: min(360px, 60vw); max-height: 50vh; overflow-y: auto; padding: 4px; border-radius: 8px; background: var(--surface); border: 1px solid var(--line); box-shadow: 0 6px 20px rgb(0 0 0 / 0.28); transform-origin: 100% 100%; animation: counts-in 0.12s var(--ease-out); }
+.hidden-head { padding: 4px 8px 5px; color: var(--faint); font-size: 10.5px; letter-spacing: 0.04em; white-space: nowrap; }
+.hidden-row { flex: none; display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 5px; text-align: left; font: 11.5px var(--mono); color: var(--dim); white-space: nowrap; }
+.hidden-row:hover { background: var(--surface-hi); color: var(--text); }
+.hidden-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.hidden-all { justify-content: space-between; margin-top: 4px; padding-top: 6px; border-top: 1px solid var(--line); border-radius: 0 0 5px 5px; }
 /* An editor with no file in it asks for one. */
 .editor-empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; text-align: center; color: var(--dim); }
 .editor-empty-title { color: var(--faint); font-size: 12px; letter-spacing: 0.04em; }
@@ -379,7 +424,8 @@ body.is-dragging-files, body.is-dragging-files * { cursor: grabbing !important; 
 .editor-error button { padding: 5px 12px; border-radius: 6px; background: var(--surface); border: 1px solid var(--line); }
 .editor-error button:hover { background: var(--surface-hi); }
 
-.markdown { position: absolute; inset: 0; overflow: auto; padding: 26px 40px 0; user-select: text; cursor: text; font: 500 calc(14px * var(--notes-size, 1))/1.62 var(--notes, -apple-system, BlinkMacSystemFont, sans-serif); }
+/* The scrollbar's 10px are kept on the right whether or not there is anything to scroll, and the padding there is 10px less: the text is 40px from both edges, so its column is in the very middle. */
+.markdown { position: absolute; inset: 0; overflow: auto; scrollbar-gutter: stable; padding: 26px 30px 0 40px; user-select: text; cursor: text; font: 500 calc(14px * var(--notes-size, 1))/1.62 var(--notes, -apple-system, BlinkMacSystemFont, sans-serif); }
 .markdown .milkdown { max-width: 44rem; position: relative; }
 .markdown .rich { outline: 0; min-height: 60vh; padding-bottom: 40vh; white-space: pre-wrap; word-wrap: break-word; caret-color: var(--accent); }
 /* The rendered view's caret is drawn (richEditing.ts) so it can glide as Monaco's does; the browser's own is hidden while it shows. */
@@ -398,7 +444,9 @@ body.is-dragging-files, body.is-dragging-files * { cursor: grabbing !important; 
 .rich-head.is-beside { height: 0; }
 .rich-head.is-beside .rich-title { margin: 0 0 0 auto; white-space: nowrap; transform-origin: 100% 0; }
 /* Above the note's text (z-index 1), which lies over the same row when the title sits beside its first line: a click on the title is the title's. */
-.rich-title { position: relative; z-index: 3; width: fit-content; min-width: 1ch; max-width: 100%; margin: 0 0 0.6em auto; outline: 0; font: italic 500 calc((1.8em + 8pt) * var(--fit, 1))/1.25 "IBM Plex Mono", var(--mono); letter-spacing: 0; text-align: right; color: color-mix(in srgb, var(--faint) 50%, transparent); transform: skewX(-7deg); transform-origin: 100% 100%; caret-color: var(--accent); white-space: nowrap; overflow: clip; overflow-clip-margin: 0.3em; text-overflow: ellipsis; }
+.rich-title { position: relative; z-index: 3; width: fit-content; min-width: 1ch; max-width: 100%; margin: 0 0 0.6em auto; outline: 0; font: italic 500 calc((1.8em + 8pt) * var(--fit, 1))/1.25 "IBM Plex Mono", var(--mono); letter-spacing: 0; text-align: right; color: color-mix(in srgb, color-mix(in srgb, var(--accent) 53%, #000) 41%, transparent); transform: skewX(-7deg); transform-origin: 100% 100%; caret-color: var(--accent); white-space: nowrap; overflow: clip; overflow-clip-margin: 0.3em; text-overflow: ellipsis; }
+/* The title's colour follows the theme: on a dark one its accent, darkened; on a light one a light grey with a little of the accent in it. */
+html[data-theme="light"] .rich-title { color: color-mix(in srgb, color-mix(in srgb, var(--accent) 20%, var(--faint)) 55%, transparent); }
 .rich-title:empty::before { content: "Untitled"; color: color-mix(in srgb, var(--faint) 28%, transparent); }
 .rich-title ::selection, .rich-title::selection { background: var(--selection); }
 .rich h1, .rich h2, .rich h3, .rich h4, .rich h5, .rich h6 { font-family: var(--notes-heading, "Literata Variable", Georgia, serif); line-height: 1.25; margin: 0.8em 0 0.5em; font-weight: 600; letter-spacing: -0.005em; }
@@ -467,7 +515,10 @@ body.is-dragging-files, body.is-dragging-files * { cursor: grabbing !important; 
 .rich li[data-item-type="task"][data-checked="true"] > p { color: var(--faint); text-decoration: line-through; }
 /* A toggle: the arrow is drawn in the space left of its title, and a closed one shows its title only. */
 .rich .toggle { position: relative; margin: 0 0 0.55em; padding-left: 1.5em; }
-.rich .toggle::before { content: ""; position: absolute; left: 0; top: 0; width: 1.3em; height: 1.62em; background: var(--dim); clip-path: polygon(36% 34%, 68% 50%, 36% 66%); cursor: pointer; transition: transform 0.12s ease; }
+.rich .toggle::before { content: ""; position: absolute; left: 0; top: 0; width: 1.4em; height: 1.66em; background: var(--dim); cursor: pointer; transition: transform 0.12s ease;
+  /* A right-pointing triangle with rounded corners (stroke + round joins), a touch larger than the old sharp clip-path one. */
+  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4.2 2.8 12.6 8 4.2 13.2Z' fill='%23000' stroke='%23000' stroke-width='2.6' stroke-linejoin='round'/%3E%3C/svg%3E");
+  -webkit-mask: var(--chevron) center / 0.9em 0.9em no-repeat; mask: var(--chevron) center / 0.9em 0.9em no-repeat; }
 .rich .toggle[data-open="true"]::before { transform: rotate(90deg); }
 .rich .toggle:hover::before { background: var(--text); }
 .rich .toggle[data-open="false"] > :not(.toggle-summary) { display: none; }
@@ -497,10 +548,11 @@ body.is-dragging-files, body.is-dragging-files * { cursor: grabbing !important; 
 .palette-row { display: flex; align-items: baseline; gap: 10px; padding: 6px 10px; border-radius: 6px; white-space: nowrap; color: var(--dim); }
 .palette-row.is-selected { background: var(--surface-hi); color: var(--text); }
 .palette-row.is-mono .palette-label { font: 12px var(--mono); }
-.palette-label { flex: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+/* A long name gives way to its keys, never the other way round. */
+.palette-label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .palette-label b { color: var(--accent); font-weight: 600; }
 .palette-detail { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 11.5px; color: var(--faint); }
-.palette-row kbd { margin-left: auto; }
+.palette-row kbd { flex: none; margin-left: auto; }
 .palette-empty { padding: 14px 10px; color: var(--faint); }
 /* The box under a clicked link in a rendered note: its address (click to go there) and a pencil to change it. */
 .link-box { position: fixed; z-index: 55; display: flex; align-items: center; gap: 2px; max-width: min(460px, calc(100vw - 16px)); padding: 3px; border-radius: 7px; background: var(--surface); border: 1px solid var(--line); box-shadow: 0 6px 20px rgb(0 0 0 / 0.28); font: 12px/1.4 var(--mono); animation: link-box-in 0.12s var(--ease-out); }
@@ -519,7 +571,21 @@ body.is-dragging-files, body.is-dragging-files * { cursor: grabbing !important; 
 .toast { position: fixed; z-index: 60; left: 50%; bottom: 26px; transform: translateX(-50%); padding: 6px 13px; border-radius: 7px; background: var(--surface-hi); border: 1px solid var(--line); box-shadow: 0 8px 26px rgb(0 0 0 / 0.35); font-size: 12px; animation: toast-in 0.14s ease-out; }
 .tooltip { position: fixed; z-index: 70; display: flex; align-items: center; gap: 9px; padding: 4px 8px; border-radius: 6px; background: var(--surface-hi); border: 1px solid var(--line); box-shadow: 0 6px 20px rgb(0 0 0 / 0.35); font-size: 11.5px; color: var(--text); white-space: nowrap; pointer-events: none; }
 .tooltip kbd { color: var(--dim); }
+/* The update notice (UpdateNotice in App.tsx): top middle of the window, just under the tab row. */
+.update-notice { position: fixed; z-index: 60; left: 50%; top: calc(var(--bar) + 8px); transform: translateX(-50%); display: flex; align-items: center; gap: 9px; padding: 5px 6px 5px 11px; border-radius: 8px; background: var(--surface-hi); border: 1px solid var(--line); box-shadow: 0 8px 26px rgb(0 0 0 / 0.35); font-size: 12px; color: var(--text); white-space: nowrap; animation: update-in 0.18s ease-out; }
+.update-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--neon); box-shadow: 0 0 6px color-mix(in srgb, var(--neon) 70%, transparent); }
+.update-go { padding: 3px 10px; border-radius: 5px; background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--text); font-weight: 600; }
+.update-go:hover { background: color-mix(in srgb, var(--accent) 38%, transparent); }
+.update-go:disabled { opacity: 0.5; }
+.update-x { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 4px; color: var(--faint); }
+.update-x:hover { background: var(--surface); color: var(--text); }
+@keyframes update-in { from { opacity: 0; transform: translate(-50%, -5px); } }
+@media (prefers-reduced-motion: reduce) { .update-notice { animation: none; } }
 @keyframes toast-in { from { opacity: 0; transform: translate(-50%, 5px); } }
+/* A message shown at the top of the window, under the tab row (and under the update notice, when that is up). */
+.toast.is-top { bottom: auto; top: calc(var(--bar) + 8px); animation-name: toast-in-top; }
+.app:has(.update-notice) .toast.is-top { top: calc(var(--bar) + 46px); }
+@keyframes toast-in-top { from { opacity: 0; transform: translate(-50%, -5px); } }
 
 .monaco-editor :focus-visible, .monaco-editor .native-edit-context { outline: 0 !important; }
 .astro-overflow { position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 40; }
@@ -558,8 +624,10 @@ body.is-dragging-files, body.is-dragging-files * { cursor: grabbing !important; 
   .app { transition: none; }
   .rich-caret.is-smooth { transition: none; }
   .tab-mark.is-running { animation: none; }
-  .toast { animation: none; }
-  .tree-arrow, .divider::after, .pane-grip, .pane-drop { transition: none; }
+  .toast, .counts-pop, .hidden-pop, .hidden-chip { animation: none; }
+  .hidden-terms { transition: none; }
+  .hidden-mark.is-working { animation: none; }
+  .tree-arrow, .tree-kids, .divider::after, .pane-grip, .pane-drop, .incoming-box, .incoming-bar, .tab-group.is-dragging.is-joining { transition: none; }
   .rich li.is-ticking::before, .rich li.is-unticking::before { animation: none; }
   .rich :is(h1, h2, h3, h4, h5, h6)::before { transition: none; }
   .rich .is-growing { animation: none; }

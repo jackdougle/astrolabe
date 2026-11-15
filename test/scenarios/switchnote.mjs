@@ -1,4 +1,4 @@
-// ⌃` jumps between the editor and the terminal; rendered notes show the file name as a title (see notetitle.mjs); ⌘N makes a stamped note in the project.
+// ⌃` jumps between the editor and the terminal; rendered notes show the file name as a title (see notetitle.mjs); ⌘N makes a note in the project.
 import fs from 'node:fs';
 export default async function ({ page, run, type, work, shot }) {
   await run(`cd ${work} && git init -q`, 1200);

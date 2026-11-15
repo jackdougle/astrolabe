@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { carried, carry } from '../lib/handoff';
 import { api, basename, dirname, tildify } from '../lib/api';
@@ -77,6 +77,33 @@ function ViewSwitch({ views }: { views: Views }) {
 }
 
 interface Entry { name: string; path: string; dir: boolean }
+
+/** What a row folds away: a folder's rows, a file's search hits. They drop down as it opens and draw back up as it
+ *  closes (`.tree-kids` in styles.css), staying in the page until they are out of sight. What is already open when
+ *  its row first shows is simply there, however late its rows arrive (`ready`): a window opening does not unfold. */
+function Fold({ open, ready = true, children }: { open: boolean; ready?: boolean; children: () => React.ReactNode }) {
+  const on = open && ready;
+  const born = useRef(open);
+  const [shown, setShown] = useState(on);
+  const [full, setFull] = useState(on);
+  const ref = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (!open) born.current = false;
+    if (on) {
+      setShown(true);
+      if (born.current || reducedMotion()) setFull(true);
+      born.current = false;
+      return;
+    }
+    setFull(false);
+    const timer = window.setTimeout(() => setShown(false), exitDelay());
+    return () => window.clearTimeout(timer);
+  }, [on, open]);
+  // In the page at no height first, and seen there, so that there is something to grow from.
+  useLayoutEffect(() => { if (shown && on && !full) { ref.current?.getBoundingClientRect(); setFull(true); } }, [shown, on, full]);
+  if (!shown) return null;
+  return <div ref={ref} className={`tree-kids${full ? ' is-open' : ''}`}><div>{children()}</div></div>;
+}
 
 function FileTree({ views }: { views: Views }) {
   const root = useStore((s) => projectRoot(s));
@@ -265,6 +292,8 @@ function FileTree({ views }: { views: Views }) {
     if (!row) return;
     reveal.current = null;
     row.scrollIntoView({ block: 'nearest' });
+    // A folder that is still dropping open has its rows short of where they will be.
+    window.setTimeout(() => { if (row.isConnected) row.scrollIntoView({ block: 'nearest' }); }, 260);
   }, [children, open, activeFile]);
 
   const toggle = (e: Entry) => {
@@ -297,7 +326,7 @@ function FileTree({ views }: { views: Views }) {
             ? <RenameField initial={e.name} onDone={async (name) => { setRenaming(null); if (name && name !== e.name) await renameEntry(e.path, name); }} />
             : <span className={`tree-name${e.dir ? ' is-dir' : ''}`}>{e.name}</span>}
         </div>
-        {e.dir && open[e.path] && renderDir(e.path, depth + 1)}
+        {e.dir && <Fold open={!!open[e.path]} ready={!!children[e.path] || creating === e.path}>{() => renderDir(e.path, depth + 1)}</Fold>}
       </div>
     ));
     return field ? [field, ...rows] : rows;
@@ -311,6 +340,7 @@ function FileTree({ views }: { views: Views }) {
       {drag && createPortal(<div className="tree-drag" style={{ transform: `translate(${drag.x + 12}px, ${drag.y + 8}px)` }}>{drag.label}</div>, document.body)}
       <div className="side-foot">
         <SettingsButton />
+        <KeysButton />
         <button className={showHidden ? 'is-on' : ''} {...tip(showHidden ? 'Hide dotfiles' : 'Show dotfiles')} onClick={() => setShowHidden(!showHidden)}><Icon name="eye" size={16} /></button>
         <button {...tip('Reload')} onClick={reload}><Icon name="refresh" size={16} /></button>
         <ViewSwitch views={views} />
@@ -392,7 +422,7 @@ function SearchPanel({ views }: { views: Views }) {
               <span className="hit-dir">{f.path.includes('/') ? f.path.slice(0, f.path.lastIndexOf('/')) : ''}</span>
               <span className="hit-count">{f.matches.length}</span>
             </div>
-            {!closed[f.path] && f.matches.map((m, i) => {
+            <Fold open={!closed[f.path]}>{() => f.matches.map((m, i) => {
               const start = Math.max(0, m.col - 1 - 24);
               const pre = m.text.slice(start, m.col - 1).trimStart();
               return (
@@ -401,15 +431,20 @@ function SearchPanel({ views }: { views: Views }) {
                   <span className="hit-text">{start > 0 && '…'}{pre}<mark>{m.text.slice(m.col - 1, m.col - 1 + m.len)}</mark>{m.text.slice(m.col - 1 + m.len, m.col - 1 + m.len + 120)}</span>
                 </div>
               );
-            })}
+            })}</Fold>
           </div>
         ))}
       </div>
-      <div className="side-foot"><SettingsButton /><ViewSwitch views={views} /></div>
+      <div className="side-foot"><SettingsButton /><KeysButton /><ViewSwitch views={views} /></div>
     </div>
   );
 }
 
 function SettingsButton() {
   return <button {...tip('Settings', 'palette.settings')} onClick={() => useStore.getState().openPalette('settings')}><Icon name="gear" size={16} /></button>;
+}
+
+/** Opens the list of every hotkey. */
+function KeysButton() {
+  return <button className="side-keys" {...tip('Hotkeys')} onClick={() => useStore.getState().openPalette('keys')}><Icon name="keyboard" size={16} /></button>;
 }

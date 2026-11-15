@@ -52,7 +52,7 @@ const api = {
     stat: (file: string) => ipcRenderer.invoke('fs:stat', file),
     listFiles: (root: string) => ipcRenderer.invoke('fs:listFiles', root),
     complete: (cwd: string, token: string) => ipcRenderer.invoke('fs:complete', cwd, token),
-    newNote: (dir: string, stamped?: boolean) => ipcRenderer.invoke('fs:newNote', dir, stamped),
+    newNote: (dir: string, template?: string) => ipcRenderer.invoke('fs:newNote', dir, template),
     rename: (from: string, name: string) => ipcRenderer.invoke('fs:rename', from, name) as Promise<{ path?: string; error?: string }>,
     move: (from: string, dir: string) => ipcRenderer.invoke('fs:move', from, dir) as Promise<{ path?: string; error?: string }>,
     trash: (target: string) => ipcRenderer.invoke('fs:trash', target) as Promise<{ ok: boolean; error?: string }>,
@@ -69,6 +69,7 @@ const api = {
     /** Saves pasted or dropped bytes that have no file on disk, and says where. */
     importImage: (noteDir: string, from: string) => ipcRenderer.invoke('fs:importImage', noteDir, from) as Promise<{ path?: string; error?: string }>,
     uploadImage: (command: string, file: string) => ipcRenderer.invoke('fs:uploadImage', command, file) as Promise<{ url?: string; error?: string }>,
+    fileClosed: (command: string, file: string) => ipcRenderer.invoke('fs:fileClosed', command, file) as Promise<{ said?: string; error?: string }>,
     savePasted: (name: string, data: Uint8Array) => ipcRenderer.invoke('fs:savePasted', name, data) as Promise<{ path?: string; error?: string }>,
   },
   shell: {
@@ -101,6 +102,31 @@ const api = {
     openExternal: (url: string) => ipcRenderer.send('app:openExternal', url),
     reveal: (file: string) => ipcRenderer.send('app:reveal', file),
     newWindow: () => ipcRenderer.send('app:newWindow'),
+    /** A tab is being dragged outside the window: shows the outline of the window it would become there (null: it came back). */
+    tearOver: (spec: unknown) => ipcRenderer.send('tear:over', spec),
+    /** That tab was let go out there, and becomes that window (null: the drag was called off). */
+    tearDrop: (spec: unknown) => ipcRenderer.send('tear:drop', spec),
+    /** `fn` hands over a tab that is leaving for a window of its own: what the new page needs to carry on with it. */
+    onPrepareMove: (fn: (what: unknown) => Promise<unknown>) => {
+      ipcRenderer.on('app:prepareMove', async (_e, token: number, what: unknown) => {
+        let data: unknown = null;
+        try { data = await fn(what); } catch {}
+        ipcRenderer.send('app:handoff', token, data);
+      });
+    },
+    /** A tab dragged out of another window is over this one, at a point of this page (null: it has gone). */
+    onTearHover: (fn: (over: unknown) => void) => on('tear:hover', fn),
+    /** That tab was let go over this window: `fn` takes it in, and says whether it could. */
+    onAdopt: (fn: (data: unknown, at: unknown) => Promise<unknown>) => {
+      ipcRenderer.on('app:adopt', async (_e, token: number, arg: { data: unknown; at: unknown }) => {
+        let ok: unknown = false;
+        try { ok = await fn(arg?.data, arg?.at); } catch {}
+        ipcRenderer.send('app:handoff', token, ok ? { ok: true } : null);
+      });
+    },
+    /** The right-click menu of a terminal tab. `join`: it can be combined with the tab in front; `part`: the
+     *  terminal clicked can leave for a tab of its own. */
+    tabMenu: (opts: { join: boolean; part: boolean }) => ipcRenderer.invoke('tab:menu', opts) as Promise<'join' | 'part' | 'close' | null>,
     closeWindow: () => ipcRenderer.send('app:closeWindow'),
     onMenuCommand: (fn: (cmd: string) => void) => on('menu:command', fn),
     onFullscreen: (fn: (on: boolean) => void) => on('win:fullscreen', fn),

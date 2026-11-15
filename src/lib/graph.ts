@@ -1,6 +1,6 @@
 // The notes of a project as a network: every Markdown file is a point, and a link from one note to another
 // ([[wiki links]], ![[embeds]] and [ordinary](links.md)) is a line between them. The points arrange themselves:
-// linked notes pull together, all notes push apart, and everything leans towards the middle.
+// linked notes pull together, notes near each other push apart, and everything leans towards the middle.
 import { api } from './api';
 
 /** An editor shows the graph of a project when its file's path is this followed by the project's folder. */
@@ -117,47 +117,90 @@ export function noteColor(t: number, dark: boolean) {
 }
 
 interface Cell { x0: number; y0: number; s: number; m: number; cx: number; cy: number; kids: (Cell | undefined)[] | null; at: number }
-const LINK = 34;      // how long a link likes to be
-const CHARGE = -42;   // how hard notes push each other apart
-const GRAVITY = 0.045; // how hard everything leans to the middle
+/** The arrangement's numbers. What the eye sees depends on their ratios, since the view is fitted to the whole. */
+export const PHYS = {
+  /** How long a link likes to be, before the room its two notes take. */ link: 46,
+  /** How hard notes push each other apart. */ charge: -60,
+  /** How hard everything leans to the middle. */ gravity: 0.07,
+  /** How much a note with no links pushes, against 1 for a linked one: lone notes pack closer, and leave the room to the linked. */ lone: 0.5,
+  /** How much more a note pushes for each link it has (by the square root), so busy notes get room about them. */ hub: 0.3,
+  /** How stiff links are. */ stiff: 0.7,
+  /** How much is left of a note's speed after each step. */ drag: 0.6,
+  /** How fast the arrangement cools. */ cool: 0.0228,
+  /** How far a note's push reaches at full strength; past this it fades fast, so a far-off group does not hold
+   *  lone notes away and they settle right beside it. */ reach: 140,
+  /** How much room a unit of push ends up with, roughly; only the starting places use it. */ room: 3600,
+};
 const THETA2 = 0.81;  // how far off a cluster of notes must be to count as one (Barnes–Hut)
 
 /** The arrangement, settling a step at a time. `alpha` is how much it still moves; it cools towards `alphaTarget`. */
 export class Sim {
   alpha = 1;
   alphaTarget = 0;
-  constructor(public g: Graph) {}
+  /** How hard each note pushes the others. */ private mass: Float32Array;
+  /** `stretch` is the pane's width over its height: the notes settle into an oval of that shape, so they fill the pane. */
+  constructor(public g: Graph, public stretch = 1) {
+    this.mass = Float32Array.from(g.nodes, (n) => (n.deg ? 1 + PHYS.hub * Math.sqrt(n.deg) : PHYS.lone));
+    this.stretch = Sim.shape(stretch);
+    // With more notes the lean is gentler, so a large project is not pressed tighter than a small one.
+    this.lean = PHYS.gravity / Math.sqrt(Math.max(1, this.mass.reduce((a, b) => a + b, 0) / 200));
+  }
+  private static shape = (stretch: number) => Math.min(2.2, Math.max(0.6, stretch || 1));
+  /** The pane has a new shape: the notes move to fill it. Says whether that was enough of a change to move for. */
+  reshape(stretch: number) {
+    const to = Sim.shape(stretch);
+    if (Math.abs(Math.log(to / this.stretch)) < 0.1) return false;
+    this.stretch = to;
+    this.alpha = Math.max(this.alpha, 0.4);
+    return true;
+  }
+  private lean: number;
 
-  /** Starting places for notes that have none: a spiral from the middle, the most linked notes first. */
+  /** Starting places for notes that have none. Left to themselves the notes end up evenly spread over an oval (each
+   *  with room in proportion to its push), so they start that way: linked notes on a spiral from the middle, the most
+   *  linked first, and lone notes sprinkled over the whole of it, since they are to end up in the gaps between groups. */
   scatter() {
-    const order = this.g.nodes.map((_, i) => i).sort((a, b) => this.g.nodes[b].deg - this.g.nodes[a].deg);
+    const nodes = this.g.nodes;
+    const order = nodes.map((_, i) => i).sort((a, b) => nodes[b].deg - nodes[a].deg);
+    const sx = Math.sqrt(this.stretch), sy = 1 / sx;
+    const per = PHYS.room / Math.PI;
+    const total = this.mass.reduce((a, b) => a + b, 0);
+    let sum = 0;
     order.forEach((i, k) => {
-      const n = this.g.nodes[i];
+      const n = nodes[i];
+      sum += this.mass[i];
       if (n.x || n.y) return;
-      const r = 12 * Math.sqrt(0.5 + k);
-      n.x = r * Math.cos(k * 2.39996); n.y = r * Math.sin(k * 2.39996);
+      // A lone note's place comes from its number alone, anywhere in the oval.
+      const u = n.deg ? sum : total * (((i * 0.7548776662) % 1) * 0.96 + 0.02);
+      const r = Math.sqrt(u * per), a = n.deg ? k * 2.39996 : ((i * 0.569840291) % 1) * 6.2832;
+      n.x = r * Math.cos(a) * sx; n.y = r * Math.sin(a) * sy;
     });
   }
 
   tick() {
     const { nodes, links } = this.g;
-    this.alpha += (this.alphaTarget - this.alpha) * 0.0228;
+    this.alpha += (this.alphaTarget - this.alpha) * PHYS.cool;
     const a = this.alpha;
     for (const [i, j] of links) {
       const s = nodes[i], t = nodes[j];
       const dx = t.x + t.vx - s.x - s.vx || 0.01, dy = t.y + t.vy - s.y - s.vy || 0.01;
       const l = Math.hypot(dx, dy);
+      // A link between busy notes is longer, so their own notes have room to gather round each.
+      const rest = PHYS.link + 5 * (Math.sqrt(s.deg) + Math.sqrt(t.deg));
       // A note with many links is tugged less by each one, so hubs hold still and their notes gather round.
-      const k = (l - LINK) / l * a / Math.min(s.deg, t.deg);
+      const k = (l - rest) / l * a * PHYS.stiff / Math.min(s.deg, t.deg);
       const b = s.deg / (s.deg + t.deg);
       t.vx -= dx * k * b; t.vy -= dy * k * b;
       s.vx += dx * k * (1 - b); s.vy += dy * k * (1 - b);
     }
     this.repel(a);
+    // The lean to the middle is weaker along the pane's longer side, which is what makes the oval. Notes only push
+    // those near them, so the oval is as long as the square root of how much weaker: hence the whole stretch each way.
+    const gx = this.lean / this.stretch * a, gy = this.lean * this.stretch * a;
     for (const n of nodes) {
-      n.vx -= n.x * GRAVITY * a; n.vy -= n.y * GRAVITY * a;
+      n.vx -= n.x * gx; n.vy -= n.y * gy;
       if (n.fx !== null && n.fy !== null) { n.x = n.fx; n.y = n.fy; n.vx = 0; n.vy = 0; continue; }
-      n.vx *= 0.6; n.vy *= 0.6;
+      n.vx *= PHYS.drag; n.vy *= PHYS.drag;
       n.x += n.vx; n.y += n.vy;
     }
   }
@@ -187,12 +230,13 @@ export class Sim {
     };
     for (let i = 0; i < nodes.length; i++) put(root, i);
     const weigh = (c: Cell) => {
-      if (!c.kids) { if (c.at >= 0) { c.m = 1; c.cx = nodes[c.at].x; c.cy = nodes[c.at].y; } return; }
+      if (!c.kids) { if (c.at >= 0) { c.m = this.mass[c.at]; c.cx = nodes[c.at].x; c.cy = nodes[c.at].y; } return; }
       for (const k of c.kids) { if (!k) continue; weigh(k); c.m += k.m; c.cx += k.cx * k.m; c.cy += k.cy * k.m; }
       if (c.m) { c.cx /= c.m; c.cy /= c.m; }
     };
     weigh(root);
     const stack: Cell[] = [];
+    const reach2 = PHYS.reach * PHYS.reach;
     for (let i = 0; i < nodes.length; i++) {
       const n = nodes[i];
       stack.length = 0; stack.push(root);
@@ -203,7 +247,7 @@ export class Sim {
         let d2 = dx * dx + dy * dy;
         if (c.kids && c.s * c.s / THETA2 >= d2) { for (const k of c.kids) if (k) stack.push(k); continue; }
         if (d2 < 1) { dx = (i % 7 - 3) * 0.1 + 0.05; dy = (i % 5 - 2) * 0.1 + 0.05; d2 = 1; }
-        const f = CHARGE * c.m * a / d2;
+        const f = PHYS.charge * c.m * a / d2 * (d2 > reach2 ? reach2 / d2 : 1);
         n.vx += dx * f; n.vy += dy * f;
       }
     }

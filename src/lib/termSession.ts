@@ -36,6 +36,8 @@ interface TermSnap {
   viewportY: number; atBottom: boolean;
   state: TermSession['state']; native: boolean; booted: boolean; promptSeen: boolean; awaitingPrompt: boolean; submitted: boolean; agentBusy: boolean;
   early: string; earlyEnter: boolean; input: string;
+  /** The shell's secret (see `nonce` below). */
+  nonce?: string | null;
   pendingHead: number | null; pendingPartial: boolean; blockSeq: number;
   blocks: (Pick<Block, 'id' | 'headPartial' | 'native' | 'endInclusive' | 'command' | 'cwd' | 'branch' | 'start' | 'duration' | 'exit'> & { head: number; out: number; end: number | null; running: boolean })[];
 }
@@ -49,8 +51,18 @@ function wire() {
   api.pty.onExit((id) => sessions.get(id)?.handleExit());
 }
 export function getSession(id: string) { return sessions.get(id); }
+/** The terminal a pane left behind when it moved to another tab (see `park`), for the pane drawn in its place. */
+export function takeParked(id: string) {
+  const s = sessions.get(id);
+  return s?.unpark() ? s : null;
+}
 (window as any).__sessions = sessions;
 export function allSessions() { return [...sessions.values()]; }
+
+/** Text on its way to a program as a paste, without the characters that would act as keys there. An escape
+ *  character is the one that matters: a pasted "end of paste" mark would let whatever follows it be typed, and run. */
+const pasteSafe = (text: string) => text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]/g, '');
+const UNSAFE_PASTE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]/;
 
 function b64(s: string) {
   try { return new TextDecoder().decode(Uint8Array.from(atob(s), (c) => c.charCodeAt(0))); } catch { return ''; }
@@ -78,6 +90,8 @@ export class TermSession {
   private layer: HTMLDivElement;
   private opened = false;
   private spawned = false;
+  /** Settles when the main process has answered for the shell just started; null once it has. */
+  private spawning: Promise<void> | null = null;
   private disposed = false;
   private ro: ResizeObserver;
   private raf = 0;
@@ -92,6 +106,11 @@ export class TermSession {
   private early = '';
   private earlyEnter = false;
   private booted = false;
+  /** The secret this terminal's shell was started with. The shell puts it on every mark it sends (where its
+   *  prompt is, what command started, what was typed ahead), and a mark without it is ignored: otherwise
+   *  anything printed here, a file shown with cat or a web page fetched with curl, could pose as the shell and
+   *  have a command of its choosing run. Null only under a main process from before shells had one. */
+  private nonce: string | null = null;
   /** The shell has reported a prompt at least once, so after each command it will again. */
   private promptSeen = false;
   /** Set by the pane: adds held-back typing to the command input, and runs it if Enter was pressed. */
@@ -107,6 +126,7 @@ export class TermSession {
   private agentBusy = false;
   private tick: number | undefined;
   private settle: number | undefined;
+  private parked: number | undefined;
   blocks: Block[] = [];
   selected: Block | null = null;
   state: 'boot' | 'prompt' | 'running' = 'boot';
@@ -135,6 +155,9 @@ export class TermSession {
           if (ev.metaKey) void openLink(uri, this.cwd());
           else useStore.getState().showToast(`Hold ⌘ and click to open the ${fileTarget(uri, '/') ? 'file' : 'link'}`);
         },
+        // The terminal underlines the piece under the pointer. The link's pieces on other rows are underlined with it.
+        hover: (_ev, uri, range) => this.underline(this.oscPieces(uri, range.start.y)),
+        leave: () => this.underline([]),
       },
     });
     this.term.loadAddon(this.fit);
@@ -143,7 +166,12 @@ export class TermSession {
     const unicode = new Unicode11Addon();
     this.term.loadAddon(unicode);
     this.term.unicode.activeVersion = '11';
-    this.term.parser.registerOscHandler(7777, (data) => { this.handleOsc(data); return true; });
+    // A mark that gets here before the shell's secret does waits for it (the terminal holds what follows meanwhile).
+    this.term.parser.registerOscHandler(7777, (data) => {
+      if (this.spawning) return this.spawning.then(() => { this.handleOsc(data); return true; });
+      this.handleOsc(data);
+      return true;
+    });
     this.term.onTitleChange((title) => this.handleTitle(title));
     this.term.attachCustomKeyEventHandler((ev) => this.handleKey(ev));
     this.term.onData((d) => this.fromTerminal(d));
@@ -153,6 +181,13 @@ export class TermSession {
     this.term.onRender(() => this.schedule());
     this.term.onWriteParsed(() => this.schedule());
     this.term.registerLinkProvider({ provideLinks: (y, cb) => { this.provideLinks(y).then(cb, () => cb(undefined)); } });
+    // Text pasted straight into the terminal: xterm would send it as it is, control characters and all.
+    this.host.addEventListener('paste', (e) => {
+      const text = e.clipboardData?.getData('text/plain') ?? '';
+      if (!UNSAFE_PASTE.test(text)) return;
+      e.preventDefault(); e.stopPropagation();
+      this.paste(text);
+    }, true);
     this.layer.addEventListener('click', (e) => this.handleLayerClick(e));
     this.host.addEventListener('mouseup', (e) => this.handleMouseUp(e));
     // Resize once the pane has stopped changing size, not on every frame of a drag. A shell (or a program
@@ -188,7 +223,7 @@ export class TermSession {
       normal: apart ? normal : full, rest: apart ? full.slice(normal.length) : '',
       viewportY: buf.viewportY, atBottom: buf.viewportY >= buf.baseY,
       state: this.state, native: this.native, booted: this.booted, promptSeen: this.promptSeen, awaitingPrompt: this.awaitingPrompt, submitted: this.submitted, agentBusy: this.agentBusy,
-      early: this.early, earlyEnter: this.earlyEnter, input: this.inputText?.() ?? '',
+      early: this.early, earlyEnter: this.earlyEnter, input: this.inputText?.() ?? '', nonce: this.nonce,
       pendingHead: row(this.pendingHead), pendingPartial: this.pendingPartial, blockSeq: this.blockSeq,
       blocks: this.blocks.flatMap((b) => {
         const head = row(b.head); const out = row(b.out);
@@ -203,7 +238,7 @@ export class TermSession {
     this.spawned = true;
     this.native = snap.native; this.state = snap.state; this.booted = snap.booted; this.promptSeen = snap.promptSeen;
     this.awaitingPrompt = snap.awaitingPrompt; this.submitted = snap.submitted; this.agentBusy = snap.agentBusy;
-    this.early = snap.early; this.earlyEnter = snap.earlyEnter; this.resumedInput = snap.input;
+    this.early = snap.early; this.earlyEnter = snap.earlyEnter; this.resumedInput = snap.input; this.nonce = snap.nonce ?? null;
     this.pendingPartial = snap.pendingPartial; this.blockSeq = snap.blockSeq;
     return new Promise<void>((done) => {
       this.term.write(snap.normal, () => {
@@ -275,7 +310,9 @@ export class TermSession {
     if (!this.spawned) {
       this.spawned = true;
       this.native = useStore.getState().settings.prompt !== 'astrolabe';
-      api.pty.spawn(this.id, { cwd: this.startCwd, cols: this.term.cols, rows: this.term.rows, prompt: this.native ? 'native' : 'own' }).then((res: { integrated: boolean }) => {
+      const spawning: Promise<{ integrated: boolean; nonce?: string }> = api.pty.spawn(this.id, { cwd: this.startCwd, cols: this.term.cols, rows: this.term.rows, prompt: this.native ? 'native' : 'own' });
+      this.spawning = spawning.then((res) => { this.nonce = res.nonce ?? null; }, () => {}).then(() => { this.spawning = null; });
+      spawning.then((res) => {
         if (!res.integrated) { this.state = 'running'; useStore.getState().patchPane(this.id, { integrated: false, atPrompt: false }); this.boot(false); }
       });
       // A shell that never reports its prompt still gets what you typed, once it has had time to start.
@@ -306,7 +343,10 @@ export class TermSession {
   // ---------- shell integration ----------
 
   private handleOsc(data: string) {
-    const [kind, a, b] = data.split(';');
+    const parts = data.split(';');
+    // The shell's marks end with its secret. Anything else that prints one does not know it.
+    if (this.nonce && parts.pop() !== this.nonce) return;
+    const [kind, a, b] = parts;
     const store = useStore.getState();
     if (kind === 'precmd') {
       const exit = Number(a) || 0;
@@ -432,7 +472,8 @@ export class TermSession {
   // ---------- input ----------
 
   run(text: string) {
-    const cmd = text.replace(/\x1b\[20[01]~/g, '');
+    // Sent as a paste, so the line is taken whole; an escape character in it could end the paste early.
+    const cmd = text.replace(/\x1b/g, '');
     if (!cmd.trim()) return;
     pushHistory(cmd.trim());
     this.select(null);
@@ -449,7 +490,7 @@ export class TermSession {
 
   send(data: string) { api.pty.write(this.id, data); }
   /** Hands text to the running program the way a paste would. */
-  paste(text: string) { this.term.paste(text); }
+  paste(text: string) { this.term.paste(pasteSafe(text)); }
 
   /** Typing has nowhere to go yet: the shell is starting, or is between a finished command and its next prompt. */
   private holding() { return !this.booted || (this.state === 'boot' && this.promptSeen); }
@@ -465,6 +506,10 @@ export class TermSession {
    *  command input owns typing, such text goes to it. Sent on, it would sit in the shell's own line under
    *  the input, out of reach of Backspace, and run with the next command. */
   private fromTerminal(data: string) {
+    // A paste comes whole, between the marks the program asked for. Its text is cleaned here as well as in
+    // `paste`, since this is the one door everything goes through.
+    const pasted = /^\x1b\[200~([\s\S]*)\x1b\[201~$/.exec(data);
+    if (pasted) data = `\x1b[200~${pasteSafe(pasted[1])}\x1b[201~`;
     const atInput = this.state === 'prompt' && !this.submitted;
     if (atInput || this.holding()) {
       const text = data.replace(/\x1b\[20[01]~/g, '').replace(/\r\n?/g, '\n');
@@ -738,6 +783,54 @@ export class TermSession {
 
   // ---------- links ----------
 
+  private linkLines: HTMLElement[] = [];
+  /** Draws a link's underline along pieces of it the terminal does not underline itself: a link that runs over
+   *  several rows is only underlined, by the terminal, on the row the pointer is on. `row` counts from the top of
+   *  the scrollback, `x` from the first column, both from 0. An empty list takes the lines away. */
+  private underline(pieces: { row: number; x: number; w: number }[]) {
+    for (const el of this.linkLines) el.remove();
+    this.linkLines = [];
+    const screen = pieces.length ? this.term.element?.querySelector<HTMLElement>('.xterm-screen') : null;
+    const cell = (this.term as any)._core?._renderService?.dimensions?.css?.cell as { width: number; height: number } | undefined;
+    if (!screen || !cell?.width || !cell.height) return;
+    const top = this.term.buffer.active.viewportY;
+    for (const p of pieces) {
+      const y = p.row - top;
+      if (y < 0 || y >= this.term.rows || p.w <= 0) continue;
+      const el = document.createElement('div');
+      el.className = 'term-link-line';
+      // Where the terminal draws its own: one device pixel above the bottom of the row, in the text's colour.
+      el.style.cssText = `left:${p.x * cell.width}px;top:${(y + 1) * cell.height - 1 - 1 / (window.devicePixelRatio || 1)}px;width:${p.w * cell.width}px;background:${this.term.options.theme?.foreground ?? 'currentColor'}`;
+      screen.appendChild(el);
+      this.linkLines.push(el);
+    }
+  }
+
+  /** The pieces, on the rows around `y` (counted from 1), of a link a program marked itself (OSC 8) and broke over several rows. */
+  private oscPieces(uri: string, y: number) {
+    const out: { row: number; x: number; w: number }[] = [];
+    try {
+      const core = (this.term as any)._core;
+      const lines = core._bufferService.buffer.lines;
+      const piece = (row: number) => {
+        const marks = lines.get(row)?._extendedAttrs as Record<number, { urlId?: number } | undefined> | undefined;
+        let a = -1; let b = -1;
+        for (const k in marks) {
+          const id = marks[k]?.urlId;
+          if (!id || core._oscLinkService.getLinkData(id)?.uri !== uri) continue;
+          const x = Number(k);
+          if (x >= this.term.cols) continue;
+          if (a < 0 || x < a) a = x;
+          if (x > b) b = x;
+        }
+        return a < 0 ? null : { row, x: a, w: b - a + 1 };
+      };
+      // Row after row, for as long as each holds a piece of the same link.
+      for (const step of [-1, 1]) for (let row = y - 1 + step, n = 0; n < 12 && row >= 0; row += step, n++) { const p = piece(row); if (!p) break; out.push(p); }
+    } catch {}
+    return out;
+  }
+
   private async provideLinks(y: number) {
     // A link can run over several rows: wrapped by the terminal, or broken at the right edge by a program
     // such as Claude Code (which goes on, indented, on the next row). Read the rows it spans as one string,
@@ -772,6 +865,18 @@ export class TermSession {
       for (let k = i; k < i + len; k++) if (cells[k]?.y === y) { if (a < 0) a = k; b = k; }
       return a < 0 ? null : { start: { x: cells[a].x, y }, end: { x: cells[b].x, y } };
     };
+    // Its parts on the other rows, underlined along with it while the pointer is on it.
+    const elsewhere = (i: number, len: number) => {
+      const rows = new Map<number, { a: number; b: number }>();
+      for (let k = i; k < i + len; k++) {
+        const c = cells[k];
+        if (!c || c.y === y) continue;
+        const r = rows.get(c.y);
+        if (r) { r.a = Math.min(r.a, c.x); r.b = Math.max(r.b, c.x); } else rows.set(c.y, { a: c.x, b: c.x });
+      }
+      const pieces = [...rows].map(([row, r]) => ({ row: row - 1, x: r.a - 1, w: r.b - r.a + 1 }));
+      return { hover: () => this.underline(pieces), leave: () => this.underline([]) };
+    };
     const links: any[] = [];
     const url = /https?:\/\/[^\s"'<>)\]]+/g;
     let m: RegExpExecArray | null;
@@ -780,26 +885,26 @@ export class TermSession {
       const range = onRow(m.index, href.length);
       if (!range) continue;
       links.push({
-        range, text: href,
+        range, text: href, ...elsewhere(m.index, href.length),
         activate: (ev: MouseEvent) => { if (ev.metaKey) api.app.openExternal(href); else useStore.getState().showToast('Hold ⌘ and click to open the link'); },
       });
     }
     const cwd = this.cwd();
     const SUFFIX = String.raw`(?::\d+(?::\d+)?|#L\d+(?:C\d+)?(?:-L?\d+)?)?`;
     const pathRe = new RegExp(String.raw`(?:file:\/\/)?(?:~|\.{1,2})?(?:\/[\w.@+\-%]+)+${SUFFIX}|[\w.@+\-]+(?:\/[\w.@+\-]+)+${SUFFIX}|[\w@+\-][\w.@+\-]*\.[A-Za-z]\w{0,7}${SUFFIX}`, 'g');
-    const candidates: { range: any; raw: string; path: string; line?: number; col?: number }[] = [];
+    const candidates: { range: any; raw: string; at: number; path: string; line?: number; col?: number }[] = [];
     while ((m = pathRe.exec(text)) && candidates.length < 12) {
       if (/^https?:?$/.test(m[0]) || text.slice(Math.max(0, m.index - 3), m.index).includes('://') && !m[0].startsWith('file:')) continue;
       const range = onRow(m.index, m[0].length);
       if (!range) continue;
       const t = fileTarget(m[0], cwd);
-      if (t) candidates.push({ range, raw: m[0], ...t });
+      if (t) candidates.push({ range, raw: m[0], at: m.index, ...t });
     }
     const stats = await Promise.all(candidates.map((c) => api.fs.stat(c.path)));
     candidates.forEach((c, i) => {
       if (!stats[i].exists || stats[i].dir) return;
       links.push({
-        range: c.range, text: c.raw,
+        range: c.range, text: c.raw, ...elsewhere(c.at, c.raw.length),
         activate: (ev: MouseEvent) => {
           if (ev.metaKey) useStore.getState().openFile(c.path, c.line ? { line: c.line, col: c.col } : undefined);
           else useStore.getState().showToast('Hold ⌘ and click to open the file');
@@ -809,9 +914,27 @@ export class TermSession {
     return links.length ? links : undefined;
   }
 
+  /** The pane is going but the terminal is not: it is on its way to another tab, where a new pane takes it up
+   *  (`takeParked`). Its shell and its screen carry on meanwhile. `input` is what the command input held. */
+  park(input: string) {
+    if (this.disposed) return;
+    this.resumedInput = input;
+    this.inputText = null; this.onEarlyInput = null; this.wantInput = null; this.inputEl = null;
+    // A pane that never comes for it leaves nothing running unseen.
+    this.parked = window.setTimeout(() => this.dispose(), 3000);
+  }
+  unpark() {
+    if (this.disposed || this.parked === undefined) return false;
+    window.clearTimeout(this.parked);
+    this.parked = undefined;
+    return true;
+  }
+
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
+    window.clearTimeout(this.parked);
+    this.underline([]);
     window.clearInterval(this.tick);
     window.clearTimeout(this.settle);
     cancelAnimationFrame(this.raf);

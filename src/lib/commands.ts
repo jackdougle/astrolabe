@@ -2,8 +2,9 @@ import { api, appInfo, basename, dirname, joinPath } from './api';
 import { GRAPH, graphRoot, isGraph } from './graph';
 import { leaves } from './layout';
 import { fileEntry, moveFiles, releaseFile, saveFile } from './monaco';
+import { carried, carry } from './handoff';
 import { bus, focusPane } from './panes';
-import { activePane, activeTab, focusedId, isMarkdown, liveEditors, openFiles, projectRoot, tabGroups, useStore } from './store';
+import { activePane, activeTab, focusedId, hiddenTerms, isMarkdown, liveEditors, openFiles, projectRoot, showing, tabGroups, useStore } from './store';
 import { getSession } from './termSession';
 
 /** `keyWhen` holds a further condition for one of the keys alone: the command's other keys work without it. */
@@ -261,6 +262,25 @@ export async function closeFileTab(paneId: string, path: string) {
   S().closeFile(paneId, path);
   releaseFile(path);
   refocus();
+  if (!isOpen(path)) void fileClosed(path);
+}
+
+const isOpen = (path: string) => openFiles(S()).some((f) => f.path === path);
+const closing = new Set<string>();
+/** Runs the command the `onFileClose` setting names, if any, on a file whose last tab has just closed, and shows what
+ *  it says. The command may have moved, changed or removed the file, so the navigator looks again afterwards. */
+async function fileClosed(path: string) {
+  const command = (S().settings.onFileClose ?? '').trim();
+  if (!command || isGraph(path) || !api.fs.fileClosed || closing.has(path)) return;
+  closing.add(path);
+  // Its tab has faded out of the row by now. A file opened again in that time, or one that went with its tab (an
+  // empty ⌘N note), is not one to act on.
+  await new Promise((done) => window.setTimeout(done, 300));
+  if (isOpen(path) || !(await api.fs.stat(path)).exists) { closing.delete(path); return; }
+  const res = await api.fs.fileClosed(command, path).finally(() => closing.delete(path));
+  if (res.error) S().showToast(`onFileClose: ${res.error}`, 7000);
+  else if (res.said) S().showToast(res.said, 6000);
+  bus.emit('fs.changed');
 }
 
 function zoom(delta: number | null) {
@@ -269,12 +289,41 @@ function zoom(delta: number | null) {
   S().showToast(`Zoom ${Math.round(S().settings.zoom * 100)}%`);
 }
 
+/** Brings Astrolabe up to date with its source folder. A change to the interface alone is built in about a
+ *  second and the window reloads where it stands, terminals still running; more than that relaunches. */
+export async function updateApp() {
+  const status = await api.app.checkUpdate();
+  if (status === 'current') { S().showToast('Astrolabe is up to date'); return; }
+  if (status === 'busy') { S().showToast('Already updating…', 120000); return; }
+  if (status === 'dev') { S().showToast('This copy runs from the dev server, which updates by itself'); return; }
+  if (status === 'no-source') { S().showToast('Cannot find the folder this copy was built from'); return; }
+  S().showToast(status === 'reload' ? 'Updating…' : 'Building the new version…', 180000);
+  const running = Object.values(S().panes).filter((p) => p.kind === 'terminal' && p.running).length;
+  const res = await api.app.installUpdate(running);
+  if (!res.ok) S().showToast(`Update failed: ${res.detail ?? 'unknown error'}`, 8000);
+  else if (res.detail) S().showToast(res.detail, res.detail === 'Relaunching…' ? 10000 : undefined);
+  else useStore.setState({ toast: null }); // updated: nothing to say, and "Updating…" should not linger
+}
+
+/** The first terminal hidden since the window opened gets a note at the top of the window naming the key that
+ *  brings it back; after that the chip in the corner is reminder enough. A reload in place does not start it over. */
+let hinted: boolean | undefined;
+carry('hideHint', () => !!hinted);
+function hideHint() {
+  hinted ??= carried<boolean>('hideHint') ?? false;
+  if (hinted) return;
+  hinted = true;
+  const key = commands.find((c) => c.id === 'term.showAll')?.keys?.[0];
+  S().showToast(key ? `Terminal hidden, ${formatKeys(key)} to unhide` : 'Terminal hidden', 4500, true);
+}
+
 export const commands: Command[] = [
   // In the editor, ⌘T means "new note here"; in a terminal it means "new tab".
   { id: 'note.new', title: 'New note beside this file', keys: ['cmd+t'], when: () => !!editor()?.active, run: () => newFileBeside(editor()!.active!) },
-  { id: 'note.newInRepo', title: 'New note in this project, with the date and street at the top', keys: ['cmd+n'], run: async () => {
-    const res = await api.fs.newNote(projectRoot(), true);
+  { id: 'note.newInRepo', title: 'New note in this project', keys: ['cmd+n'], run: async () => {
+    const res = await api.fs.newNote(projectRoot(), (S().settings.noteTemplate ?? '').trim());
     if (res.error) { S().showToast(`Could not create a note: ${res.error}`); return; }
+    if (res.warning) S().showToast(`noteTemplate: ${res.warning}`, 7000);
     S().openFile(res.path, { line: 1, end: true, blank: res.text }, { keep: true });
     bus.emit('fs.changed');
   } },
@@ -288,6 +337,18 @@ export const commands: Command[] = [
     const e = editor();
     if (e?.active) closeFileTab(e.id, e.active);
     else { const id = focusedId(); if (id) S().closePane(id); refocus(); }
+  } },
+  // ⌘U hides, ⇧⌘U unhides. (Not H or J keys: ⌘H and ⌥⌘H are macOS's own and hide the whole app or every other
+  // one, which is another kind of hiding, and other apps take ⇧⌘J from anywhere.) The terminal is the one used
+  // last in the tab in front, wherever the keyboard is, as long as the terminals are on screen.
+  { id: 'term.hide', title: 'Hide this terminal (it keeps running)', keys: ['cmd+u'], when: () => showing(S()) !== 'editor' && tabGroups(S()).some((t) => t.id === S().activeTab), run: () => {
+    const before = hiddenTerms(S()).length;
+    S().hideTerm(); refocus();
+    if (hiddenTerms(S()).length > before) hideHint();
+  } },
+  { id: 'term.showAll', title: 'Bring the hidden terminals back', keys: ['cmd+shift+u'], run: () => {
+    if (!hiddenTerms(S()).length) { S().showToast('No terminal is hidden'); return; }
+    S().showAllTerms(); refocus();
   } },
   { id: 'pane.splitRight', title: 'Split right: a new terminal', keys: ['cmd+d'], run: () => { S().split('row'); refocus(); } },
   { id: 'pane.splitDown', title: 'Split down: a new terminal', keys: ['cmd+shift+d'], run: () => { S().split('col'); refocus(); } },
@@ -336,6 +397,7 @@ export const commands: Command[] = [
   { id: 'palette.fontsHeadings', title: 'Choose notes heading font (Google Fonts)', run: () => S().openPalette('fonts-headings') },
   { id: 'palette.fontsCode', title: 'Choose terminal and code font (Google Fonts)', run: () => S().openPalette('fonts-code') },
   { id: 'palette.settings', title: 'Settings: appearance, fonts, font sizes, behaviour', run: () => S().openPalette('settings') },
+  { id: 'palette.keys', title: 'Hotkeys: every keyboard shortcut', run: () => S().openPalette('keys') },
   { id: 'term.clear', title: 'Clear terminal', keys: ['cmd+k'], when: () => !!term(), run: () => { getSession(term()!.id)?.clear(); } },
   { id: 'term.find', title: 'Find in terminal', keys: ['cmd+f'], when: () => !!term(), run: () => bus.emit('term.find', term()!.id) },
   { id: 'term.blockPrev', title: 'Select previous block', keys: ['cmd+arrowup'], when: () => !!term() && term()!.atPrompt, run: () => getSession(term()!.id)?.selectRelative(-1) },
@@ -357,22 +419,8 @@ export const commands: Command[] = [
   { id: 'editor.toggleWrap', title: 'Turn word wrap on or off', keys: ['alt+z'], run: () => { S().updateSettings({ wordWrap: !S().settings.wordWrap }); S().showToast(S().settings.wordWrap ? 'Word wrap on' : 'Word wrap off'); } },
   { id: 'editor.toggleCaret', title: 'Turn smooth caret on or off', run: () => { S().updateSettings({ smoothCaret: !S().settings.smoothCaret }); S().showToast(S().settings.smoothCaret ? 'Smooth caret on' : 'Smooth caret off'); } },
   { id: 'editor.toggleRendered', title: 'Switch Markdown between rendered and raw', keys: ['cmd+shift+r', 'cmd+shift+v'], when: () => !!editor()?.active && isMarkdown(editor()!.active!), run: () => { const e = editor()!; S().toggleRendered(e.id, e.active!); refocus(); } },
-  {
-    // ⌘R, anywhere, brings Astrolabe up to date with its source folder. A change to the interface alone is
-    // built in about a second and the window reloads where it stands, terminals still running; more than that relaunches.
-    id: 'app.update', title: 'Update Astrolabe from its source folder', keys: ['cmd+r'], run: async () => {
-      const status = await api.app.checkUpdate();
-      if (status === 'current') { S().showToast('Astrolabe is up to date'); return; }
-      if (status === 'busy') { S().showToast('Already updating…', 120000); return; }
-      if (status === 'dev') { S().showToast('This copy runs from the dev server, which updates by itself'); return; }
-      if (status === 'no-source') { S().showToast('Cannot find the folder this copy was built from'); return; }
-      S().showToast(status === 'reload' ? 'Updating…' : 'Building the new version…', 180000);
-      const running = Object.values(S().panes).filter((p) => p.kind === 'terminal' && p.running).length;
-      const res = await api.app.installUpdate(running);
-      if (!res.ok) S().showToast(`Update failed: ${res.detail ?? 'unknown error'}`, 8000);
-      else S().showToast(res.detail ?? 'Updated', res.detail === 'Relaunching…' ? 10000 : undefined);
-    },
-  },
+  // No key of its own: the notice at the top of the window (UpdateNotice in App.tsx) offers it whenever the source folder has changed.
+  { id: 'app.update', title: 'Update Astrolabe from its source folder', run: () => { void updateApp(); } },
   { id: 'view.zoomIn', title: 'Zoom in', keys: ['cmd+='], run: () => zoom(0.1) },
   { id: 'view.zoomOut', title: 'Zoom out', keys: ['cmd+-'], run: () => zoom(-0.1) },
   { id: 'view.zoomReset', title: 'Reset zoom', keys: ['cmd+0'], run: () => zoom(null) },
@@ -433,6 +481,41 @@ export function formatKeys(k: string) {
   const order = ['ctrl', 'alt', 'shift', 'cmd'];
   const parts = k.split('+').sort((a, b) => (order.indexOf(a) + 1 || 9) - (order.indexOf(b) + 1 || 9));
   return parts.map((p) => sym[p] ?? p.toUpperCase()).join('');
+}
+
+/** Keys that are not commands of their own: the editor's, the command line's and the mouse's. */
+const OTHER_KEYS: [title: string, keys: string][] = [
+  ['Command line: take the grey suggestion', '⇥  →'],
+  ['Command line: previous command', '↑  ⌃P'],
+  ['Command line: new line in the command', '⌥↩'],
+  ['Command line: delete the word behind the caret', '⌃W'],
+  ['Command line: delete back to the start of the line', '⌃U'],
+  ['Command line: clear what is typed, or interrupt the program', '⌃C'],
+  ['Notes and code: move the line up or down', '⌥↑  ⌥↓'],
+  ['Notes and code: copy the line up or down', '⇧⌥↑  ⇧⌥↓'],
+  ['Notes and code: delete the line', '⇧⌘K'],
+  ['Notes and code: select the line', '⌃L'],
+  ['Notes and code: new line below, or tick the task on this line', '⌘↩'],
+  ['Notes and code: cut or copy the line, with nothing selected', '⌘X  ⌘C'],
+  ['Notes: strike through', '⇧⌘X'],
+  ['Notes: indent or outdent a list item', '⇥  ⇧⇥'],
+  ['Notes: bold, in a rendered note', '⌘B'],
+  ['Raw Markdown: outline of headings', '⇧⌘O'],
+  ['Open a file path or a link', '⌘ click'],
+  ['Navigator: open a file to the side', '⌥ click'],
+  ['Reload the window where it stands', '⌥⌘R'],
+];
+/** Every hotkey, for the list the navigator's keyboard button opens. A row that is a command has its `id`. */
+export function hotkeys(): { id?: string; title: string; keys: string }[] {
+  const rows: { id?: string; title: string; keys: string }[] = [];
+  for (const c of commands) {
+    if (!c.keys?.length) continue;
+    // The nine keys of a row of tabs are one line each.
+    const many = /^(tab|file)\.(\d)$/.exec(c.id);
+    if (many) { if (many[2] === '1') rows.push({ title: many[1] === 'tab' ? 'Go to terminal tab 1 to 9 (9 is the last)' : 'Go to open file 1 to 9 (9 is the last)', keys: `${formatKeys(c.keys[0])}–9` }); continue; }
+    rows.push({ id: c.id, title: c.title, keys: c.keys.map(formatKeys).join('  ') });
+  }
+  return [...rows, ...OTHER_KEYS.map(([title, keys]) => ({ title, keys }))];
 }
 
 export function paneCount() { const t = activeTab(); return t ? leaves(t.root).length : 0; }

@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import { api, tildify } from '../lib/api';
 import { pickAndAttach } from '../lib/commands';
 import { attachEmoji, contextValue, ensureHistory, ghostFor, history, loneColon, monaco, monoFont, overflowNode, registerInput } from '../lib/monaco';
-import { bus, paneHandles } from '../lib/panes';
+import { bus, moving, paneHandles } from '../lib/panes';
 import { focusedId, TermPane, termWeight, useStore } from '../lib/store';
-import { TermSession } from '../lib/termSession';
+import { takeParked, TermSession } from '../lib/termSession';
 import { Icon } from './Icons';
 import { tip } from './Tooltip';
 
@@ -22,7 +22,9 @@ export function TerminalPane({ pane, active }: { pane: TermPane; active: boolean
 
   // One session and one input editor per pane, for the pane's whole life.
   useEffect(() => {
-    const session = new TermSession(pane.id, pane.startCwd);
+    // A terminal moved here from another tab is the same terminal: its screen and its shell come with it.
+    const session = takeParked(pane.id) ?? new TermSession(pane.id, pane.startCwd);
+    moving.delete(pane.id);
     sessionRef.current = session;
     session.mount(areaRef.current!);
     ensureHistory();
@@ -162,7 +164,9 @@ export function TerminalPane({ pane, active }: { pane: TermPane; active: boolean
     return () => {
       offEvents(); offFind(); offSet(); offInsert(); emojiSub.dispose(); unregister();
       paneHandles.delete(pane.id);
-      editor.dispose(); model.dispose(); session.dispose();
+      // Moving to another tab, the terminal waits for the pane drawn there; closed, it goes.
+      if (moving.has(pane.id)) session.park(model.getValue()); else session.dispose();
+      editor.dispose(); model.dispose();
       sessionRef.current = null; editorRef.current = null;
     };
   }, [pane.id]);

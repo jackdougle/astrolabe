@@ -6,6 +6,12 @@ import os from 'node:os';
 import path from 'node:path';
 
 const ZSHENV = `
+# The app only believes marks that carry this session's secret, so nothing a program prints can pass for the
+# shell's own (see handleOsc in src/lib/termSession.ts). It is kept out of the environment of whatever runs here.
+if [[ -n "$ASTROLABE_NONCE" ]]; then
+  typeset -g __astrolabe_nonce="$ASTROLABE_NONCE"
+  unset ASTROLABE_NONCE
+fi
 if [[ -f "$ASTROLABE_USER_ZDOTDIR/.zshenv" && "$ASTROLABE_USER_ZDOTDIR" != "$ASTROLABE_ZDOTDIR" ]]; then
   ZDOTDIR="$ASTROLABE_USER_ZDOTDIR"
   . "$ASTROLABE_USER_ZDOTDIR/.zshenv"
@@ -39,13 +45,13 @@ __astrolabe_b64() { builtin print -rn -- "$1" | command base64 | command tr -d '
 # Runs first among precmd hooks so $? is still the command's exit status.
 __astrolabe_precmd_first() {
   local ret=$?
-  builtin printf '\\e]7777;precmd;%s;%s\\a' "$ret" "$(__astrolabe_b64 "$PWD")"
+  builtin printf '\\e]7777;precmd;%s;%s;%s\\a' "$ret" "$(__astrolabe_b64 "$PWD")" "$__astrolabe_nonce"
   typeset -gi __astrolabe_prompting=1
   return $ret
 }
 __astrolabe_preexec() {
   typeset -gi __astrolabe_prompting=0
-  builtin printf '\\e[0m\\e]7777;preexec;%s\\a' "$(__astrolabe_b64 "$1")"
+  builtin printf '\\e[0m\\e]7777;preexec;%s;%s\\a' "$(__astrolabe_b64 "$1")" "$__astrolabe_nonce"
 }
 # Keys typed while a command ran are still waiting when the next prompt's line editor starts. The app's input
 # owns typing, so they are passed to it instead of being let into this line, where they could not be edited.
@@ -53,7 +59,7 @@ __astrolabe_typeahead() {
   (( __astrolabe_prompting )) || return 0
   local typed= k
   while (( PENDING > 0 && \${#typed} < 4096 )) && builtin read -k 1 k 2>/dev/null; do typed+=$k; done
-  [[ -n "$typed" ]] && builtin printf '\\e]7777;typed;%s\\a' "$(__astrolabe_b64 "$typed")"
+  [[ -n "$typed" ]] && builtin printf '\\e]7777;typed;%s;%s\\a' "$(__astrolabe_b64 "$typed")" "$__astrolabe_nonce"
   return 0
 }
 precmd_functions=(__astrolabe_precmd_first \${precmd_functions:#__astrolabe_precmd_*})
@@ -66,7 +72,7 @@ if [[ "$ASTROLABE_PROMPT" == own ]]; then
   fi
   # Runs last so it wins over prompt themes.
   __astrolabe_precmd_last() {
-    PROMPT=$'\\n\\n%{\\e]7777;prompt\\a%}'
+    PROMPT=$'\\n\\n%{\\e]7777;prompt;'"$__astrolabe_nonce"$'\\a%}'
     RPROMPT=''
   }
   precmd_functions+=(__astrolabe_precmd_last)
@@ -75,7 +81,7 @@ if [[ "$ASTROLABE_PROMPT" == own ]]; then
   setopt PROMPT_CR PROMPT_SP PROMPT_PERCENT
 else
   # Your prompt stays. Tell the app when the line editor is ready, so it can put its input at the cursor.
-  __astrolabe_line_init() { __astrolabe_typeahead; builtin printf '\\e]7777;input\\a' }
+  __astrolabe_line_init() { __astrolabe_typeahead; builtin printf '\\e]7777;input;%s\\a' "$__astrolabe_nonce" }
   autoload -Uz add-zle-hook-widget 2>/dev/null && add-zle-hook-widget line-init __astrolabe_line_init
   zle_highlight=(\${zle_highlight:#(default|paste):*} default:bold paste:none)
 fi
@@ -120,10 +126,10 @@ export function stripSessionMarkers(env: NodeJS.ProcessEnv) {
   return env;
 }
 
-export function shellEnv(shell: string, integrationDir: string | null, prompt: 'own' | 'native' = 'native'): NodeJS.ProcessEnv {
+export function shellEnv(shell: string, integrationDir: string | null, prompt: 'own' | 'native' = 'native', nonce = ''): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = stripSessionMarkers({ ...process.env });
   for (const k of Object.keys(env)) {
-    if (k.startsWith('ELECTRON_') || k.startsWith('ASTROLABE_DEV') || k === 'NODE_OPTIONS') delete env[k];
+    if (k.startsWith('ELECTRON_') || k.startsWith('ASTROLABE_DEV') || k === 'NODE_OPTIONS' || k === 'ASTROLABE_NONCE') delete env[k];
   }
   env.TERM = 'xterm-256color';
   env.COLORTERM = 'truecolor';
@@ -138,6 +144,7 @@ export function shellEnv(shell: string, integrationDir: string | null, prompt: '
     env.ASTROLABE_ZDOTDIR = integrationDir;
     env.ZDOTDIR = integrationDir;
     env.ASTROLABE_PROMPT = prompt;
+    if (nonce) env.ASTROLABE_NONCE = nonce;
   }
   return env;
 }
