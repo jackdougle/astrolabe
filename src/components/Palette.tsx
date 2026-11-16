@@ -20,7 +20,7 @@ const PLACEHOLDER: Record<PaletteMode, string> = {
   'fonts-headings': 'Search Google Fonts for note headings',
   'fonts-code': 'Search monospaced Google Fonts for the terminal and editor',
   settings: 'Settings',
-  appearance: 'Theme, starfield',
+  appearance: 'Theme, starfield, note title, wire artwork',
   fonts: 'Which font',
   sizes: 'Font and navigator sizes',
   behaviour: 'Editing, terminal and session options',
@@ -79,13 +79,13 @@ function PaletteBody({ initial }: { initial: PaletteMode }) {
   };
   const go = (next: PaletteMode) => { revertPreview(); setMode(next); setQuery(''); };
   const back = () => { const parent = PARENT[mode]; if (parent) go(parent); else close(); };
-  const flip = (key: 'wordWrap' | 'smoothCaret' | 'restoreSession' | 'previewTabs' | 'starfield') => {
+  const flip = (key: 'wordWrap' | 'smoothCaret' | 'restoreSession' | 'previewTabs' | 'starfield' | 'noteTitle' | 'titleWires') => {
     const patch: Partial<Settings> = { [key]: !useStore.getState().settings[key] };
     useStore.getState().updateSettings(patch);
   };
   const choose = (items: Choice[]): Row[] => fuzzyFilter(query, items, (c) => c.label, 60).map((h) => ({ ...h.item, positions: h.positions }));
 
-  useEffect(() => { inputRef.current?.focus(); }, []);
+  useEffect(() => { inputRef.current?.focus(); }, [mode]); // also after a row has taken you to another list, so typing searches it
   useEffect(() => {
     if (mode !== 'files') return;
     let live = true;
@@ -106,7 +106,8 @@ function PaletteBody({ initial }: { initial: PaletteMode }) {
       { key: 'appearance', label: 'Appearance and themes', detail: getTheme(settings.theme).name, run: () => go('appearance') },
       { key: 'fonts', label: 'Fonts', detail: settings.fontFamily || 'Commit Mono', run: () => go('fonts') },
       { key: 'sizes', label: 'Font sizes', detail: `${settings.fontSize}px terminal, ${settings.sidebarSize}px navigator`, run: () => go('sizes') },
-      { key: 'behaviour', label: 'Behaviour', detail: `word wrap ${on(settings.wordWrap)}, smooth caret ${on(settings.smoothCaret)}`, run: () => go('behaviour') },
+      { key: 'behaviour', label: 'Behaviour', detail: `smooth caret ${on(settings.smoothCaret)}`, run: () => go('behaviour') },
+      { key: 'keys', label: 'Hotkeys', detail: 'every keyboard shortcut', run: () => go('keys') },
       { key: 'file', label: 'Open settings file', hint: formatKeys('cmd+,'), run: () => { close(); commands.find((c) => c.id === 'settings.open')?.run(); } },
     ]);
     if (mode === 'appearance') return choose([
@@ -115,6 +116,8 @@ function PaletteBody({ initial }: { initial: PaletteMode }) {
         preview: () => { applyTheme(t); setMonacoTheme(t); bus.emit('theme.preview', t.id); },
         run: () => { committed.current = true; useStore.getState().updateSettings({ theme: t.id }); setMonacoTheme(t); close(); },
       })),
+      { key: 'noteTitle', label: 'File name as a title on rendered notes', detail: on(settings.noteTitle), run: () => flip('noteTitle') },
+      { key: 'titleWires', label: 'Wire artwork around the note title', detail: settings.noteTitle ? on(settings.titleWires) : 'Off (the title is off)', run: () => flip('titleWires') },
       { key: 'starfield', label: 'Starfield behind the window', detail: on(settings.starfield), run: () => flip('starfield') },
     ]);
     if (mode === 'fonts') return choose([
@@ -132,7 +135,6 @@ function PaletteBody({ initial }: { initial: PaletteMode }) {
     if (mode === 'behaviour') {
       const next = SCROLL_STEPS[(SCROLL_STEPS.indexOf(settings.scrollSpeed) + 1) % SCROLL_STEPS.length] ?? 2.5;
       return choose([
-        { key: 'wrap', label: 'Word wrap in the editor', detail: on(settings.wordWrap), hint: formatKeys('alt+z'), run: () => flip('wordWrap') },
         { key: 'caret', label: 'Smooth caret', detail: on(settings.smoothCaret), run: () => flip('smoothCaret') },
         { key: 'preview', label: 'Temporary tabs for opened files', detail: on(settings.previewTabs), run: () => flip('previewTabs') },
         { key: 'restore', label: 'Reopen last session on launch', detail: on(settings.restoreSession), run: () => flip('restoreSession') },

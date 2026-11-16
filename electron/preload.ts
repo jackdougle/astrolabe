@@ -127,6 +127,9 @@ const api = {
     /** The right-click menu of a terminal tab. `join`: it can be combined with the tab in front; `part`: the
      *  terminal clicked can leave for a tab of its own. */
     tabMenu: (opts: { join: boolean; part: boolean }) => ipcRenderer.invoke('tab:menu', opts) as Promise<'join' | 'part' | 'close' | null>,
+    /** A right-click menu the page describes: rows with an id and a label, `null` for a line between them. Gives the
+     *  id of the row chosen. */
+    menu: (items: ({ id: string; label: string; enabled?: boolean } | null)[]) => ipcRenderer.invoke('app:menu', items) as Promise<string | null>,
     closeWindow: () => ipcRenderer.send('app:closeWindow'),
     onMenuCommand: (fn: (cmd: string) => void) => on('menu:command', fn),
     onFullscreen: (fn: (on: boolean) => void) => on('win:fullscreen', fn),

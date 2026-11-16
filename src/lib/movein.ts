@@ -1,6 +1,7 @@
 import { api } from './api';
 import { carried, offer } from './handoff';
 import { computeLayout, Edge, keepLeaves, leaves } from './layout';
+import { spotAt } from './dock';
 import { bringUnsaved } from './monaco';
 import { bus, focusPane } from './panes';
 import { EditorPane, focusedId, Pane, shownTerms, Tab, tabGroups, useStore } from './store';
@@ -51,17 +52,14 @@ export function landing(over: Pick<Over, 'x' | 'y' | 'kind'>): Landing {
     const ids = shownTerms(s, front);
     const live = keepLeaves(front.root, (id) => ids.includes(id));
     const rects = front.maximized || !live ? [{ pane: front.activePane, rect: { x: 0, y: 0, w: 100, h: 100 } }] : computeLayout(live).panes;
-    const px = (x - b.left) / b.width * 100;
-    const py = (y - b.top) / b.height * 100;
-    const on = rects.find(({ rect: r }) => px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h);
-    if (on) {
-      const r = on.rect;
-      const dx = (px - r.x) / r.w - 0.5;
-      const dy = (py - r.y) / r.h - 0.5;
-      const edge: Edge = Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? 'left' : 'right') : dy < 0 ? 'top' : 'bottom';
-      // It takes half of that terminal's room, on the side it was let go.
+    // As for a terminal carried about its own window (dock.ts): half of the terminal under it, on the pointer's
+    // side, or that whole side of the tab close to a wall.
+    const at = spotAt(b, rects, x, y);
+    if (at) {
+      const edge = at.edge;
+      const r = rects.find((p) => p.pane === at.target)?.rect ?? { x: 0, y: 0, w: 100, h: 100 };
       const half = edge === 'left' ? { ...r, w: r.w / 2 } : edge === 'right' ? { ...r, x: r.x + r.w / 2, w: r.w / 2 } : edge === 'top' ? { ...r, h: r.h / 2 } : { ...r, y: r.y + r.h / 2, h: r.h / 2 };
-      return { kind: 'join', tab: front.id, target: on.pane, edge, block: false, box: { left: b.left + half.x / 100 * b.width, top: b.top + half.y / 100 * b.height, width: half.w / 100 * b.width, height: half.h / 100 * b.height } };
+      return { kind: 'join', tab: front.id, target: at.target, edge, block: false, box: { left: b.left + half.x / 100 * b.width, top: b.top + half.y / 100 * b.height, width: half.w / 100 * b.width, height: half.h / 100 * b.height } };
     }
   }
   // Anywhere else it becomes the last tab of the row.

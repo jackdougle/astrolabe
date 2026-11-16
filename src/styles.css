@@ -36,6 +36,8 @@ input { font: inherit; color: inherit; }
 kbd { font: 11px var(--mono); color: var(--faint); letter-spacing: 0.04em; }
 .ico { display: block; flex: none; }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
+/* Where two scrollbars would meet, and the grip of a resizable box: left unstyled these are white squares in the corner. */
+::-webkit-scrollbar-corner, ::-webkit-resizer { background: transparent; }
 ::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--faint) 45%, transparent); border-radius: 5px; border: 2.5px solid transparent; background-clip: content-box; }
 ::-webkit-scrollbar-thumb:hover { background: var(--faint); background-clip: content-box; }
 body.is-resizing { cursor: col-resize; }
@@ -118,6 +120,9 @@ body.is-resizing .zone { transition: none; }
 .toptab.filetab.is-temp .filetab-name { font-style: italic; }
 .tab-file { flex: none; display: grid; place-items: center; width: 9px; margin: 0 -1px; color: var(--faint); }
 .toptab.is-active .tab-file, .toptab.is-shown .tab-file { color: var(--dim); }
+/* A code file's mark is its language's logo: drawn larger than the page a note shows (in the same room, so tabs keep their width) and a step brighter, so it reads at a glance. */
+.tab-file.is-lang { color: var(--dim); }
+.toptab.is-active .tab-file.is-lang, .toptab.is-shown .tab-file.is-lang { color: var(--text); }
 /* Unsaved changes: the page glows and pulses, as a terminal's dot does while it works. */
 .tab-file.is-dirty, .toptab:is(.is-active, .is-shown) .tab-file.is-dirty { color: var(--neon); filter: drop-shadow(0 0 3px var(--neon)) drop-shadow(0 0 6px color-mix(in srgb, var(--neon) 60%, transparent)); animation: pulse 1.6s ease-in-out infinite; }
 /* A name too long for its tab fades out at the end instead of being cut with dots: every letter that fits shows. */
@@ -136,7 +141,7 @@ body.is-resizing .zone { transition: none; }
 .toptab:hover .toptab-key { display: none; }
 /* A tab being dragged stays under the pointer, above the rest, while the tabs it passes slide out of its way. */
 .is-dragging { z-index: 50; pointer-events: none; cursor: grabbing; }
-.tab-group.is-dragging, .toptab.filetab.is-dragging { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, var(--line)), 0 6px 18px rgb(0 0 0 / 0.4); background: var(--surface); }
+.tab-group.is-dragging:not(.is-away), .toptab.filetab.is-dragging { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, var(--line)), 0 6px 18px rgb(0 0 0 / 0.4); background: var(--surface); }
 /* Dragged out of the window: it waits in its place, faint, while an outline out there shows the window it would become. */
 .tab-group.is-dragging.is-torn, .toptab.filetab.is-dragging.is-torn { opacity: 0.35; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, var(--line)); }
 /* A tab, or a terminal carried up from below, would join this one if let go. The tab that would join it draws in. */
@@ -165,7 +170,7 @@ body.is-dragging-tab .toptab-close { display: none !important; }
 .top-btn:hover { color: var(--text); background: var(--surface); }
 .stack { flex: 1; min-height: 0; position: relative; }
 /* The terminals' area and the editors' area, side by side. One that is hidden keeps its place, so its terminals keep their size. */
-.area { position: absolute; top: 0; bottom: 0; transition: left var(--enter) var(--ease-out), width var(--enter) var(--ease-out); }
+.area { position: absolute; top: 0; bottom: 0; transition: left var(--enter) var(--ease-out), width var(--enter) var(--ease-out), top var(--enter) var(--ease-out), height var(--enter) var(--ease-out); }
 .area.is-hidden { visibility: hidden; pointer-events: none; }
 .area.is-hidden .tab-area.is-active { visibility: hidden; pointer-events: none; }
 /* The last thing in it is fading out, over the other area as that takes the room. */
@@ -196,8 +201,15 @@ body.is-resizing .area { transition: none !important; }
 body.is-moving-pane { cursor: grabbing; }
 body.is-moving-pane .stack { pointer-events: none; }
 .pane.is-moving { opacity: 0.5; }
-/* Where the pane being dragged will land. */
-.pane-drop { position: absolute; z-index: 8; pointer-events: none; border: 1.5px solid var(--accent); border-radius: var(--radius); background: color-mix(in srgb, var(--accent) 14%, transparent); transition: left 0.1s var(--ease-out), top 0.1s var(--ease-out), width 0.1s var(--ease-out), height 0.1s var(--ease-out); }
+/* Where the thing being carried would land (dock.ts): it glides from one place to the next as the pointer moves. */
+.dock { position: fixed; inset: 0; z-index: 80; pointer-events: none; }
+.dock-box { position: fixed; box-sizing: border-box; border: 1.5px solid var(--accent); border-radius: var(--radius); background: color-mix(in srgb, var(--accent) 16%, transparent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent); transition: left 0.12s var(--ease-out), top 0.12s var(--ease-out), width 0.12s var(--ease-out), height 0.12s var(--ease-out); animation: dock-in 0.1s var(--ease-out); }
+@keyframes dock-in { from { opacity: 0; } }
+/* Nowhere to land under the pointer: its label goes faint. */
+.dock .incoming-chip { transition: opacity 0.12s; }
+.dock .incoming-chip.is-idle { opacity: 0.6; }
+/* A terminal carried out of its tab's block: its stretch of the block waits, faint. */
+.tab-group > .toptab.is-lifted { opacity: 0.35; }
 
 /* ---------- sidebar ---------- */
 .sidebar-slot { flex: none; position: relative; border-right: 1px solid var(--line); transition: width 0.24s var(--ease-out), border-color 0.24s, background-color 0.32s ease; }
@@ -206,7 +218,7 @@ body.is-moving-pane .stack { pointer-events: none; }
 /* Pinned to the slot's right edge, so it slides out from behind the left side of the window as the slot widens. */
 .sidebar { position: absolute; top: 0; bottom: 0; right: 0; max-width: none; display: flex; flex-direction: column; transition: opacity 0.2s ease, transform 0.24s var(--ease-out); }
 .sidebar-slot:not(.is-open) .sidebar { opacity: 0; transform: translateX(-10px); }
-.sidebar-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.sidebar-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-x: hidden; }
 .sidebar-resize { position: absolute; top: 0; bottom: 0; right: -4px; width: 8px; cursor: col-resize; z-index: 7; }
 
 .tab-mark { flex: none; width: 7px; height: 7px; border-radius: 50%; border: 1.3px solid var(--faint); }
@@ -225,12 +237,23 @@ body.is-moving-pane .stack { pointer-events: none; }
 .side-title span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .side-title button, .side-foot button { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 4px; color: var(--faint); }
 .side-title button:hover, .side-title button.is-on, .side-foot button:hover, .side-foot button.is-on { color: var(--text); background: var(--surface); }
-.side-foot { flex: none; display: flex; align-items: center; justify-content: flex-start; gap: 4px; padding: 6px 8px 8px; border-top: 1px solid var(--line); }
+/* The bar at the navigator's foot (Sidebar.tsx): 24px buttons, --per-line of them to a line. A navigator too narrow for that wraps sooner. */
+/* The foot never scrolls, sideways or otherwise (a bar that scrolled showed a white square where its scrollbars met).
+   Its buttons are centred across and down. */
+.side-foot { flex: none; display: flex; align-items: center; justify-content: center; min-height: 40px; padding: 8px 10px; border-top: 1px solid var(--line); overflow: hidden; overscroll-behavior: none; }
+.side-foot-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 4px; width: calc(var(--per-line, 4) * 28px - 4px); max-width: 100%; }
+.side-foot button { width: 24px; height: 24px; }
+.side-foot button.is-on { color: var(--accent); }
+/* The navigator's button: at the left end of the top row, between the window's own buttons and the first tab. It
+   sits a little to the right of them and a touch lower than the row's middle, which is where their centres are. */
+.top-btn.side-open { margin: 0 4px 0 calc(6px / var(--zoom)); transform: translateY(calc(1.5px / var(--zoom))); }
+.top-btn.side-open.is-on { color: var(--dim); }
+.app.is-fullscreen .top-btn.side-open { margin-left: 0; transform: none; }
 /* The navigator's text size; Settings > Font sizes sets --sidebar-size. */
 .sidebar { font-size: var(--sidebar-size, calc(12px + 0.5pt)); }
 .side-note { padding: 8px 14px; color: var(--faint); }
 .filetree, .searchpanel { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.tree-scroll { flex: 1; min-height: 0; overflow: auto; padding-bottom: 12px; }
+.tree-scroll { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; padding-bottom: 12px; }
 .treerow { display: flex; align-items: center; gap: 3px; height: 23px; padding-right: 8px; color: var(--text); white-space: nowrap; }
 .treerow:hover { background: color-mix(in srgb, var(--surface) 70%, transparent); color: var(--text); }
 .treerow.is-active { background: var(--surface); color: var(--text); }
@@ -283,9 +306,9 @@ body.is-dragging-files, body.is-dragging-files * { cursor: grabbing !important; 
 .editor-pane, .sidebar-slot { background: var(--bg-deep); }
 .topbar { background: color-mix(in srgb, var(--bg-deep) calc(var(--chrome-layer) * 100%), transparent); }
 .term-area { position: relative; flex: 1; min-height: 0; overflow: hidden; }
-.term-host { position: absolute; inset: 0; }
+.term-host { position: absolute; inset: 0; overflow: hidden; }
 .term-host .xterm { height: 100%; padding: 8px 2px 0 20px; }
-.term-host .xterm-viewport { background: transparent !important; }
+.term-host .xterm-viewport { background: transparent !important; overflow-x: hidden !important; }
 /* The underline of a hovered link, along its pieces on rows other than the pointer's (termSession.ts). */
 .term-link-line { position: absolute; z-index: 6; height: 1px; pointer-events: none; }
 
@@ -388,6 +411,16 @@ body.is-dragging-files, body.is-dragging-files * { cursor: grabbing !important; 
 /* Terminals taken off screen with ⌘U: a chip in the bottom right corner of the terminals, and the list it opens. */
 .hidden-terms { position: absolute; bottom: 7px; z-index: 9; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; font-size: 11px; pointer-events: none; transition: right var(--enter) var(--ease-out); }
 .hidden-terms.is-apart { align-items: flex-start; }
+/* Typing close to it: it turns to glass, so the words show through, and lets clicks through, until the pointer moves.
+   It eases there and back; nothing about it appears or disappears. */
+.hidden-terms .hidden-chip { transition: color 0.34s var(--ease-out), background-color 0.34s var(--ease-out), box-shadow 0.34s var(--ease-out), -webkit-backdrop-filter 0.34s var(--ease-out), backdrop-filter 0.34s var(--ease-out); -webkit-backdrop-filter: blur(0) saturate(1); backdrop-filter: blur(0) saturate(1); }
+.hidden-terms .hidden-chip .hidden-mark { transition: opacity 0.34s var(--ease-out); }
+.hidden-terms.is-clear .hidden-chip {
+  pointer-events: none; color: color-mix(in srgb, var(--text) 30%, transparent); background: color-mix(in srgb, var(--text) 5%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 11%, transparent), inset 0 1px 0 color-mix(in srgb, var(--text) 16%, transparent);
+  -webkit-backdrop-filter: blur(1.5px) saturate(1.4); backdrop-filter: blur(1.5px) saturate(1.4);
+}
+.hidden-terms.is-clear .hidden-chip .hidden-mark { opacity: 0.45; }
 .hidden-terms > * { pointer-events: auto; }
 .hidden-chip { display: flex; align-items: center; gap: 6px; padding: 2px 8px 2px 7px; border-radius: 5px; color: var(--dim); background: color-mix(in srgb, var(--bg-deep) 88%, transparent); box-shadow: inset 0 0 0 1px var(--line); white-space: nowrap; font-variant-numeric: tabular-nums; animation: counts-in 0.14s var(--ease-out); }
 .hidden-chip:hover, .hidden-chip[aria-expanded="true"] { color: var(--text); background: var(--surface); }
@@ -425,7 +458,7 @@ body.is-dragging-files, body.is-dragging-files * { cursor: grabbing !important; 
 .editor-error button:hover { background: var(--surface-hi); }
 
 /* The scrollbar's 10px are kept on the right whether or not there is anything to scroll, and the padding there is 10px less: the text is 40px from both edges, so its column is in the very middle. */
-.markdown { position: absolute; inset: 0; overflow: auto; scrollbar-gutter: stable; padding: 26px 30px 0 40px; user-select: text; cursor: text; font: 500 calc(14px * var(--notes-size, 1))/1.62 var(--notes, -apple-system, BlinkMacSystemFont, sans-serif); }
+.markdown { position: absolute; inset: 0; overflow-x: hidden; overflow-y: auto; scrollbar-gutter: stable; padding: 26px 30px 0 40px; user-select: text; cursor: text; font: 500 calc(14px * var(--notes-size, 1))/1.62 var(--notes, -apple-system, BlinkMacSystemFont, sans-serif); }
 .markdown .milkdown { max-width: 44rem; position: relative; }
 .markdown .rich { outline: 0; min-height: 60vh; padding-bottom: 40vh; white-space: pre-wrap; word-wrap: break-word; caret-color: var(--accent); }
 /* The rendered view's caret is drawn (richEditing.ts) so it can glide as Monaco's does; the browser's own is hidden while it shows. */
@@ -475,7 +508,9 @@ html[data-theme="light"] .rich-title { color: color-mix(in srgb, color-mix(in sr
 .rich li > ul, .rich li > ol { margin: 0.2em 0 0; }
 .rich a { color: var(--info); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; }
 .rich code { font: 0.88em var(--mono); padding: 0.1em 0.35em; border-radius: 4px; background: var(--surface); }
-.rich pre { padding: 12px 14px; border-radius: 7px; background: var(--bg-deep); border: 1px solid var(--line); overflow: auto; white-space: pre; }
+/* Nothing in a note scrolls sideways: code wraps, a wide table's cells wrap, and a long address breaks. */
+.markdown .rich, .markdown .rich :is(p, li, th, td, a, code) { overflow-wrap: anywhere; }
+.rich pre { padding: 12px 14px; border-radius: 7px; background: var(--bg-deep); border: 1px solid var(--line); overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; }
 .rich pre code { padding: 0; background: none; font-size: 12px; line-height: 1.5; }
 /* A stretch of the file shown as its Markdown source, because the rendered view has no block for it. */
 .rich pre[data-language="astrolabe:source"] { position: relative; padding-top: 22px; background: none; border-style: dashed; white-space: pre-wrap; }
@@ -526,7 +561,7 @@ html[data-theme="light"] .rich-title { color: color-mix(in srgb, color-mix(in sr
 .rich .toggle > :last-child { margin-bottom: 0; }
 .rich .toggle-summary:has(> br:only-child)::before { content: "Toggle"; position: absolute; color: var(--faint); pointer-events: none; }
 .rich hr { border: 0; height: 1px; background: var(--line); margin: 1.8em 0; }
-.rich table { border-collapse: collapse; font-size: 0.93em; }
+.rich table { border-collapse: collapse; font-size: 0.93em; max-width: 100%; }
 .rich th, .rich td { padding: 5px 11px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
 .rich th { background: var(--surface); font-weight: 600; }
 .rich img { max-width: 100%; height: auto; border-radius: 4px; vertical-align: bottom; }
@@ -625,9 +660,9 @@ html[data-theme="light"] .rich-title { color: color-mix(in srgb, color-mix(in sr
   .rich-caret.is-smooth { transition: none; }
   .tab-mark.is-running { animation: none; }
   .toast, .counts-pop, .hidden-pop, .hidden-chip { animation: none; }
-  .hidden-terms { transition: none; }
+  .hidden-terms, .hidden-terms .hidden-chip, .hidden-terms .hidden-chip .hidden-mark { transition: none; }
   .hidden-mark.is-working { animation: none; }
-  .tree-arrow, .tree-kids, .divider::after, .pane-grip, .pane-drop, .incoming-box, .incoming-bar, .tab-group.is-dragging.is-joining { transition: none; }
+  .tree-arrow, .tree-kids, .divider::after, .pane-grip, .dock-box, .dock .incoming-chip, .incoming-box, .incoming-bar, .tab-group.is-dragging.is-joining { transition: none; }
   .rich li.is-ticking::before, .rich li.is-unticking::before { animation: none; }
   .rich :is(h1, h2, h3, h4, h5, h6)::before { transition: none; }
   .rich .is-growing { animation: none; }

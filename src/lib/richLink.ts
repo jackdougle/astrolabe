@@ -6,7 +6,6 @@ import { appInfo, dirname } from './api';
 import { openLink } from './links';
 
 const PENCIL = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M10.9 2.6l2.5 2.5L5.6 12.9l-3.2.7.7-3.2z"/><path d="M9.4 4.1l2.5 2.5"/></svg>';
-const GO = '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5h6.5V10M12.2 3.8L4 12"/></svg>';
 
 let close: (() => void) | null = null;
 export function closeLinkBox() { close?.(); }
@@ -39,7 +38,7 @@ export function showLinkBox(view: EditorView, a: HTMLAnchorElement, event: Mouse
   const file = (view.dom.closest('[data-file]') as HTMLElement | null)?.dataset.file;
   const box = document.createElement('div');
   box.className = 'link-box';
-  box.innerHTML = `<button class="link-go" type="button"><span></span>${GO}</button><button class="link-edit" type="button" title="Edit link">${PENCIL}</button>`;
+  box.innerHTML = `<button class="link-go" type="button"><span></span></button><button class="link-edit" type="button" title="Edit link">${PENCIL}</button>`;
   const go = box.querySelector('.link-go') as HTMLButtonElement;
   const edit = box.querySelector('.link-edit') as HTMLButtonElement;
   go.firstElementChild!.textContent = href || 'No address';

@@ -1,6 +1,6 @@
-// A pane is moved by the grip at the middle of its top edge: dragged over another pane, it lands against that pane's
-// nearest edge; at the rim of the tab it takes that whole side. Terminals move among the terminals of their tab and
-// editors among the editors, and shells keep running.
+// A pane is also moved by the grip at the middle of its top edge (its tab does the same: see dock.mjs): carried over
+// another pane, it takes the half of it on the pointer's side; close to a wall of its area it takes that whole side;
+// a terminal over the editors takes its whole area to that side of them. Shells keep running.
 export default async function ({ page, shot, run, work }) {
   const at = (ms) => page.waitForTimeout(ms);
   // Each pane as kind:name@x,y+w×h in percent of the tab.
@@ -22,7 +22,7 @@ export default async function ({ page, shot, run, work }) {
     await page.mouse.move(x, y); await at(150); await page.mouse.down();
     await page.mouse.move(x + 10, y + 10, { steps: 3 });
     await page.mouse.move(t.x + t.width * fx, t.y + t.height * fy, { steps: 8 }); await at(250);
-    const outline = await page.evaluate(() => { const d = document.querySelector('.pane-drop'); return d ? `${d.style.left} ${d.style.top} ${d.style.width} ${d.style.height}` : 'none'; });
+    const outline = await page.evaluate(() => { const d = document.querySelector('.dock-box'); return d ? `${d.style.left} ${d.style.top} ${d.style.width} ${d.style.height}` : 'none'; });
     if (cancel) await page.keyboard.press('Escape');
     await page.mouse.up(); await at(700);
     return outline;
@@ -45,11 +45,11 @@ export default async function ({ page, shot, run, work }) {
   o = await drag('C', 'A', 0.5, 0.005); await look('C dragged to the top rim of the tab', `outline was ${o}`);
   await shot('panedrag-3-c-across-top');
 
-  // The editors are an area of their own beside the terminals: a terminal dragged over it stays where it was, and
-  // an editor moves among the editors only.
+  // The editors are an area of their own beside the terminals: a terminal carried over the lower part of it takes
+  // the terminals below the editors, and an editor moves among the editors.
   await page.evaluate((p) => window.__store.getState().openFile(p), `${work}/notes/plan.md`); await at(1200);
   await look('opened plan.md');
-  o = await drag('B', 'editor', 0.5, 0.85); await look('B dragged over the editor (nothing moves)', `outline was ${o}`);
+  o = await drag('B', 'editor', 0.5, 0.85); await look('B dragged over the lower part of the editor (the terminals go below it)', `outline was ${o}`);
   await page.evaluate(() => window.__store.getState().splitEditor('right')); await at(1000);
   {
     const ids = await page.evaluate(() => [...document.querySelectorAll('.tab-area[data-tab="editors"] .pane')].map((p) => p.dataset.pane));

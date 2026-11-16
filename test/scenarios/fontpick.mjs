@@ -3,7 +3,7 @@ export default async function ({ page, shot, run, work }) {
   await run(`cd ${work}`);
   await page.keyboard.press('Meta+b');
   await page.waitForTimeout(400);
-  await page.click('.side-foot button:first-child');
+  await page.click('.side-foot .side-settings');
   await page.waitForTimeout(250);
   await page.click('.palette-row:has-text("Fonts")');
   await page.waitForTimeout(250);
@@ -27,7 +27,7 @@ export default async function ({ page, shot, run, work }) {
   await page.waitForTimeout(200);
   await page.keyboard.press('Escape');
   await page.waitForTimeout(200);
-  await page.click('.side-foot button:first-child');
+  await page.click('.side-foot .side-settings');
   await page.waitForTimeout(250);
   await page.click('.palette-row:has-text("Fonts")');
   await page.waitForTimeout(250);

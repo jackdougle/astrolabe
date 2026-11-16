@@ -1,9 +1,14 @@
 import { ReactNode } from 'react';
+import { LOGOS } from './logos';
 
 const P: Record<string, ReactNode> = {
   plus: <path d="M8 3.5v9M3.5 8h9" />,
   graph: <><circle cx="4" cy="11.6" r="1.6" /><circle cx="12.2" cy="11" r="1.6" /><circle cx="8.4" cy="4.3" r="1.8" /><path d="M4.9 10.2l2.5-4.2M9.3 5.9l2.1 3.6M5.6 11.5l5-.4" /></>,
   x: <path d="M4.5 4.5l7 7M11.5 4.5l-7 7" />,
+  // A page under a magnifier: open a file by its name.
+  quickOpen: <><path d="M12 6.6V5.5l-3-3H4.5a.5.5 0 0 0-.5.5v10a.5.5 0 0 0 .5.5h2.2" /><path d="M9 2.5v3h3" /><circle cx="10" cy="10.4" r="2.3" /><path d="M11.7 12.1l1.9 1.9" /></>,
+  // A page with a pencil across its corner: a new note.
+  note: <><path d="M7.4 2.5H4a.5.5 0 0 0-.5.5v10a.5.5 0 0 0 .5.5h7.5a.5.5 0 0 0 .5-.5V9" /><path d="M11.6 2.3a1.2 1.2 0 0 1 1.7 1.7L8.6 8.7l-2.2.5.5-2.2z" /></>,
   tabs: <path d="M3 4.5h10M3 8h10M3 11.5h10" />,
   files: <><path d="M2.5 4.5a1 1 0 0 1 1-1h3l1.2 1.5h4.8a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1z" /></>,
   search: <><circle cx="7" cy="7" r="3.8" /><path d="M10 10l3.2 3.2" /></>,
@@ -30,23 +35,19 @@ const P: Record<string, ReactNode> = {
   code: <g transform="scale(0.6667)" strokeWidth="2"><path d="m16 18 6-6-6-6" /><path d="m8 6-6 6 6 6" /></g>,
   // Lucide "settings" (ISC licence), drawn on a 24 grid and scaled to this 16 box.
   gear: <g transform="scale(0.6667)" strokeWidth="2"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915" /><circle cx="12" cy="12" r="3" /></g>,
-  // Programming-language marks for file tabs (fileIcons.ts): outline line-art in the set's house style, so the tab's
-  // own colour and its neon dirty-pulse carry over. Symbolic rather than brand-exact; refine any that read poorly.
-  langPy: <><rect x="3.3" y="2.7" width="6.6" height="5" rx="2" /><rect x="6.1" y="8.3" width="6.6" height="5" rx="2" /><circle cx="5.2" cy="4.6" r="0.7" /><circle cx="10.8" cy="11.4" r="0.7" /></>,
-  langJs: <><rect x="2.4" y="2.4" width="11.2" height="11.2" rx="2.6" /><path d="M7 6.3v3.2c0 1-.5 1.5-1.3 1.5-.6 0-1-.3-1.2-.8" /><path d="M11.5 7c-.2-.6-.7-.9-1.3-.9-.7 0-1.2.4-1.2 1 0 1.5 2.7.8 2.7 2.4 0 .7-.6 1.2-1.4 1.2-.7 0-1.2-.3-1.5-.9" /></>,
-  langTs: <><rect x="2.4" y="2.4" width="11.2" height="11.2" rx="2.6" /><path d="M4.9 6.4h3.4M6.6 6.4v4.6" /><path d="M11.8 7c-.2-.6-.7-.9-1.3-.9-.7 0-1.2.4-1.2 1 0 1.5 2.6.8 2.6 2.4 0 .7-.6 1.2-1.4 1.2-.7 0-1.2-.3-1.5-.9" /></>,
-  langRust: <><circle cx="8" cy="8" r="2.7" /><path d="M8 3.8v1.5M8 10.7v1.5M3.8 8h1.5M10.7 8h1.5M5.05 5.05l1.05 1.05M9.9 9.9l1.05 1.05M10.95 5.05l-1.05 1.05M5.05 10.95l1.05-1.05" /></>,
-  langJulia: <><circle cx="4.8" cy="10.6" r="1.7" /><circle cx="11.2" cy="10.6" r="1.7" /><circle cx="8" cy="5" r="1.7" /></>,
+  // Programming-language marks for file tabs (fileIcons.ts). Languages with a logo of their own show it, as a flat
+  // shape (logos.ts, drawn by `Icon` below); JSON and shell scripts have none people know, so they keep a drawn sign.
   langJson: <><path d="M6.5 3C5.2 3 5.4 4.8 5.4 6c0 1-.8 1.6-1.4 2 .6.4 1.4 1 1.4 2 0 1.2-.2 3 1.1 3" /><path d="M9.5 3c1.3 0 1.1 1.8 1.1 3 0 1 .8 1.6 1.4 2-.6.4-1.4 1-1.4 2 0 1.2.2 3-1.1 3" /></>,
-  langHtml: <><path d="M5.4 4.3 2.3 8l3.1 3.7M10.6 4.3 13.7 8l-3.1 3.7M9.3 3.3 6.7 12.7" /></>,
-  langCss: <><path d="M6.3 3 5.1 13M11 3 9.8 13M3.3 6.4h9.3M2.8 9.8h9.3" /></>,
   langShell: <><path d="M3.5 4.7 7 8l-3.5 3.3M8.2 11.6h4.3" /></>,
 };
 
+/** Logos that are a solid square: drawn a little smaller, so they weigh the same as the others in a row of tabs. */
+const BLOCK = new Set(['langJs', 'langTs']);
+/** One of the line icons above, or a language's logo. */
 export function Icon({ name, size = 14 }: { name: keyof typeof P | string; size?: number }) {
   return (
     <svg className="ico" viewBox="0 0 16 16" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      {P[name]}
+      {LOGOS[name] ? <path d={LOGOS[name]} transform={BLOCK.has(name) ? 'translate(0.8 0.8) scale(0.6)' : 'scale(0.6667)'} fill="currentColor" stroke="none" /> : P[name]}
     </svg>
   );
 }

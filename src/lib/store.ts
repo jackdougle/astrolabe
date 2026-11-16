@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { api, appInfo, basename, tildify } from './api';
 import { carried, carry, hasCarried } from './handoff';
-import { addLeaf, addNode, Edge, keepLeaves, LayoutNode, leaves, moveLeaf, removeLeaf, replaceLeaf, setRatio } from './layout';
+import { addLeaf, addNode, Edge, keepLeaves, LayoutNode, leaves, moveLeaf, opposite, removeLeaf, replaceLeaf, setRatio } from './layout';
 import { exitDelay } from './motion';
 import { bus, markMoving } from './panes';
 import { applyTheme, getTheme } from './themes';
@@ -19,7 +19,8 @@ export interface TermPane {
 }
 export interface OpenFile {
   path: string; rendered: boolean;
-  /** On a note made by ⌘N: the text it was made with. Closed while it still holds exactly that, the note is deleted. */
+  /** On a note made by ⌘N, ⌘T or ⌃⌘F: the text it was made with. Closed, or left as a background tab (untitled.ts), while
+   *  it still holds exactly that, the note is deleted. */
   blank?: string;
   /** A temporary tab: the file was opened to look at, and the next file opened in this editor takes its place.
    *  Saving it, or a double click on it (in the navigator or on its tab), keeps it. */
@@ -63,11 +64,17 @@ export interface Settings {
   notesFont: string;
   /** Google Fonts family for headings in rendered notes; empty means the bundled Literata. */
   headingFont: string;
-  wordWrap: boolean; smoothCaret: boolean;
+  /** No longer read: lines always wrap, since nothing scrolls sideways. Kept so that old settings files still load. */
+  wordWrap: boolean;
+  smoothCaret: boolean;
   /** Where new terminal tabs start, e.g. "~/projects". Empty means your home folder. Splits stay in the folder you split from. */
   startDirectory: string;
   /** Faint constellation lines behind everything. */
   starfield: boolean;
+  /** The file's name shown at the top of a rendered note (click it to rename the file). */
+  noteTitle: boolean;
+  /** The circuit traces drawn running out from that title. */
+  titleWires: boolean;
   /** A command that uploads a picture: it is given the file's path as its last argument and prints the picture's web
    *  address. When set, a picture put into a note is uploaded and the note holds that address, so it shows wherever
    *  the note's text goes. Empty (the default) sends nothing anywhere: pictures stay files beside the note. */
@@ -90,11 +97,11 @@ export interface Settings {
   /** How far a scroll gesture moves, as a multiple of the system's own distance. Applies to terminals, the editor, notes and the navigator. */
   scrollSpeed: number;
   /** Which side of the terminals the code and notes editor sits on. */
-  editorSide: 'left' | 'right';
+  editorSide: Edge;
 }
 export const DEFAULT_SETTINGS: Settings = {
   theme: 'meridian', zoom: 1, fontSize: 12.5, notesSize: 1, sidebarSize: 12.67, fontWeight: 600, fontFamily: '', notesFont: '', headingFont: '',
-  wordWrap: true, smoothCaret: true, restoreSession: true, previewTabs: true, starfield: true, startDirectory: '', imageUpload: '', noteTemplate: '', onFileClose: '',
+  wordWrap: true, smoothCaret: true, restoreSession: true, previewTabs: true, starfield: true, noteTitle: true, titleWires: true, startDirectory: '', imageUpload: '', noteTemplate: '', onFileClose: '',
   prompt: 'shell', opacityFocused: 0.95, opacityUnfocused: 0.89,
   chromeOpacityFocused: 1, chromeOpacityUnfocused: 0.94, scrollSpeed: 2.5, editorSide: 'right',
 };
@@ -132,6 +139,9 @@ interface State {
   showTerm(id: string): void;
   /** Brings every hidden terminal back. The one hidden last ends up in front. */
   showAllTerms(): void;
+  /** Hides again the terminals `showAllTerms` last brought back, in the order they were in, as long as none has
+   *  been hidden since. False when there is nothing to hide again. */
+  hideAgain(): boolean;
   /** A new terminal beside the one used last. Always a terminal, wherever the keyboard is. */
   split(dir: 'row' | 'col'): void;
   setActiveTab(id: string): void;
@@ -169,8 +179,11 @@ interface State {
   placeFile(paneId: string, path: string, target: string | null, where: Edge | 'into'): void;
   /** Shows the file you are in a second time, in a new editor against one edge of this one. */
   splitEditor(edge: Edge): void;
-  /** Puts the editors left or right of the terminals, and keeps that. */
-  setEditorSide(side: 'left' | 'right' | 'toggle'): void;
+  /** A new editor with no file in it yet, against that edge of the editor `beside` (or of the one used last). With no
+   *  editor open it opens the editor area. */
+  newEditor(edge: Edge, beside?: string): void;
+  /** Puts the editors on that side of the terminals (beside them, above or below), and keeps that. */
+  setEditorSide(side: Edge | 'toggle'): void;
   patchPane(id: string, patch: Partial<TermPane> | Partial<EditorPane>): void;
   commandFinished(paneId: string, exit: number): void;
   /** Opens a file in the editor used last (the first file opens the editor area). `beside` opens it in a new editor
@@ -191,6 +204,9 @@ interface State {
    *  at the top instead, for something to be noticed once. */
   showToast(text: string, ms?: number, top?: boolean): void;
 }
+
+/** The terminals ⇧⌘U last brought back, and when each had been hidden: pressed again, it hides them again. */
+let broughtBack: { id: string; at: number }[] = [];
 
 let seq = 0;
 export const uid = (p: string) => `${p}${Date.now().toString(36)}${(seq++).toString(36)}`;
@@ -257,6 +273,7 @@ export const useStore = create<State>((set, get) => ({
       }
       const layout = adopt({ ...left, panes });
       if (layout.tabs.length || layout.editors.root) {
+        if (Array.isArray(left.broughtBack)) broughtBack = left.broughtBack.filter((x) => typeof x?.id === 'string' && Number.isFinite(x.at));
         set({ ready: true, settings, sidebar: left.sidebar, fullscreen: left.fullscreen, ...layout });
         // A file taken out of another window is all its own window holds.
         if (!layout.tabs.length && !left.torn) get().newTab(undefined, { stay: true });
@@ -369,6 +386,8 @@ export const useStore = create<State>((set, get) => ({
       // Nothing else is open: a new terminal takes its place, so the window is never empty.
       else { set({ panes }); get().newTab(); }
     }
+    // Hiding one by hand settles what is hidden: what was last brought back is no longer waiting to go again.
+    broughtBack = [];
     // It fades out as a closed terminal does, but it is only marked hidden, never removed.
     fadeOut(pane.id, true, () => {});
   },
@@ -386,7 +405,22 @@ export const useStore = create<State>((set, get) => ({
   },
 
   showAllTerms() {
-    for (const p of hiddenTerms(get()).reverse()) get().showTerm(p.id);
+    const all = hiddenTerms(get());
+    for (const p of [...all].reverse()) get().showTerm(p.id);
+    broughtBack = all.map((p) => ({ id: p.id, at: p.hidden! }));
+  },
+
+  hideAgain() {
+    const live = (s: State, id: string) => { const p = s.panes[id]; return p?.kind === 'terminal' && !p.hidden && !s.leaving[id]; };
+    const list = broughtBack.filter((x) => live(get(), x.id)).sort((a, b) => a.at - b.at);
+    if (hiddenTerms(get()).length || !list.length) return false;
+    for (const x of list) get().hideTerm(x.id);
+    // Each keeps the place it had in the list of hidden terminals.
+    const panes = { ...get().panes };
+    for (const x of list) { const p = panes[x.id]; if (p?.kind === 'terminal' && p.hidden) panes[x.id] = { ...p, hidden: x.at }; }
+    set({ panes });
+    broughtBack = [];
+    return true;
   },
 
   split(dir) {
@@ -632,9 +666,22 @@ export const useStore = create<State>((set, get) => ({
     set({ panes: { ...s.panes, [pane.id]: pane }, focus: 'editor', editors: { root: addLeaf(s.editors.root, pane.id, from.id, edge, uid('s')), active: pane.id, maximized: false } });
   },
 
+  newEditor(edge, beside) {
+    const s = get();
+    const pane: EditorPane = { id: uid('e'), kind: 'editor', files: [], active: null, reveal: null };
+    const live = liveEditors(s);
+    if (!s.editors.root || !live.length) {
+      set({ panes: { ...s.panes, [pane.id]: pane }, editors: { root: { type: 'leaf', pane: pane.id }, active: pane.id, maximized: false }, focus: 'editor', areas: { ...s.areas, full: false } });
+      return;
+    }
+    const at = beside && live.some((e) => e.id === beside) ? beside : live.some((e) => e.id === s.editors.active) ? s.editors.active : live[0].id;
+    // If the terminals had the window to themselves, the editors come back beside them.
+    set({ panes: { ...s.panes, [pane.id]: pane }, focus: 'editor', areas: showing(s) === 'terminal' ? { ...s.areas, full: false } : s.areas, editors: { root: addLeaf(s.editors.root, pane.id, at, edge, uid('s')), active: pane.id, maximized: false } });
+  },
+
   setEditorSide(side) {
     const now = get().settings.editorSide;
-    const want: 'left' | 'right' = side === 'toggle' ? (now === 'left' ? 'right' : 'left') : side;
+    const want: Edge = side === 'toggle' ? opposite(now) : side;
     if (now !== want) get().updateSettings({ editorSide: want });
   },
 
@@ -857,13 +904,13 @@ function adopt(saved: SavedLayout): Pick<State, 'tabs' | 'activeTab' | 'panes' |
 }
 
 /** What a page reloading in place leaves for the next one (see handoff.ts). */
-interface Carried extends SavedLayout { sidebar: State['sidebar']; fullscreen: boolean; /** It is a tab taken out of another window (tearoff.ts). */ torn?: boolean }
+interface Carried extends SavedLayout { sidebar: State['sidebar']; fullscreen: boolean; /** It is a tab taken out of another window (tearoff.ts). */ torn?: boolean; broughtBack?: { id: string; at: number }[] }
 carry('layout', (): Carried | null => {
   const s = useStore.getState();
   if (!s.ready || (!s.tabs.length && !s.editors.root)) return null;
   // Whatever was fading out after being closed is gone.
   const tabs = s.tabs.filter((t) => !s.leaving[t.id]);
-  return { tabs, activeTab: s.activeTab, panes: s.panes, editors: s.editors, focus: s.focus, areas: s.areas, termCwd: s.termCwd, sidebar: s.sidebar, fullscreen: s.fullscreen };
+  return { tabs, activeTab: s.activeTab, panes: s.panes, editors: s.editors, focus: s.focus, areas: s.areas, termCwd: s.termCwd, sidebar: s.sidebar, fullscreen: s.fullscreen, broughtBack };
 });
 
 /** Marks something as leaving so it can animate out, then runs `finish` (unless the close was called off meanwhile). */

@@ -187,7 +187,8 @@ export function EditorPane({ pane, active }: { pane: EditorPaneState; active: bo
     const s = useStore.getState().settings;
     const editor = monaco.editor.create(hostRef.current!, {
       model: null, theme: 'astrolabe', fontFamily: monoFont(), fontSize: s.fontSize, lineHeight: 1.55,
-      wordWrap: s.wordWrap ? 'on' : 'off', wrappingIndent: 'same',
+      // Lines always wrap: nothing in the app scrolls sideways.
+      wordWrap: 'on', wrappingIndent: 'same', scrollBeyondLastColumn: 0,
       cursorSmoothCaretAnimation: s.smoothCaret ? 'on' : 'off', cursorBlinking: 'smooth', cursorWidth: 2,
       smoothScrolling: true, emptySelectionClipboard: true,
       mouseWheelScrollSensitivity: scrollSpeed(s), fastScrollSensitivity: scrollSpeed(s) * 4,
@@ -195,7 +196,7 @@ export function EditorPane({ pane, active }: { pane: EditorPaneState; active: bo
       automaticLayout: true, fixedOverflowWidgets: true, overflowWidgetsDomNode: overflowNode, stickyScroll: { enabled: false },
       bracketPairColorization: { enabled: true }, guides: { indentation: true, bracketPairs: false },
       padding: { top: 10, bottom: 24 }, lineNumbersMinChars: 3, lineDecorationsWidth: 12, glyphMargin: false,
-      scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10, useShadows: false },
+      scrollbar: { verticalScrollbarSize: 10, horizontal: 'hidden', horizontalScrollbarSize: 0, useShadows: false },
       overviewRulerBorder: false, unicodeHighlight: { ambiguousCharacters: false },
     });
     editorRef.current = editor;
@@ -277,11 +278,11 @@ export function EditorPane({ pane, active }: { pane: EditorPaneState; active: bo
 
   useEffect(() => {
     editorRef.current?.updateOptions({
-      wordWrap: settings.wordWrap ? 'on' : 'off', cursorSmoothCaretAnimation: settings.smoothCaret ? 'on' : 'off',
+      cursorSmoothCaretAnimation: settings.smoothCaret ? 'on' : 'off',
       fontSize: settings.fontSize, fontFamily: monoFont(),
       mouseWheelScrollSensitivity: scrollSpeed(settings), fastScrollSensitivity: scrollSpeed(settings) * 4,
     });
-  }, [settings.wordWrap, settings.smoothCaret, settings.fontSize, settings.fontFamily, settings.scrollSpeed]);
+  }, [settings.smoothCaret, settings.fontSize, settings.fontFamily, settings.scrollSpeed]);
 
   // The rendered view is a second editor over the same text: edits made there are written back to the file's buffer.
   useEffect(() => {
@@ -321,7 +322,7 @@ export function EditorPane({ pane, active }: { pane: EditorPaneState; active: bo
         <div className={`editor-host${file && isMarkdown(file.path) ? ' is-note' : ''}`} ref={hostRef} style={{ display: rendered || error || graph || !file ? 'none' : undefined }} />
         <div className="markdown" style={{ display: rendered && !error ? undefined : 'none' }}
           onMouseDown={(e) => { if (e.target === e.currentTarget) { e.preventDefault(); richHandle.current?.focus(); } }}>
-          {file && rendered && <NoteTitle path={file.path} toNote={() => richHandle.current?.focus()} note={richRef} alone={!richNote} />}
+          {file && rendered && settings.noteTitle && <NoteTitle path={file.path} toNote={() => richHandle.current?.focus()} note={richRef} alone={!richNote} />}
           {richNote && <div className="rich-note">{richNote}</div>}
           <div ref={richRef} />
         </div>
@@ -593,6 +594,7 @@ function NoteTitle({ path, toNote, note, alone }: { path: string; toNote: () => 
   // it sits: on a row of its own or beside the first line. They are laid out again as the text changes shape.
   const wires = useRef<HTMLCanvasElement>(null);
   const theme = useStore((s) => s.settings.theme);
+  const wired = useStore((s) => s.settings.titleWires);
   useEffect(() => {
     const head = headRef.current, title = ref.current, canvas = wires.current, root = note.current;
     const scroller = head?.closest('.markdown') as HTMLElement | null;
@@ -640,7 +642,7 @@ function NoteTitle({ path, toNote, note, alone }: { path: string; toNote: () => 
       cancelAnimationFrame(frame); sizes.disconnect(); edits.disconnect(); document.fonts.removeEventListener('loadingdone', later);
       root?.removeEventListener('transitionend', later); root?.removeEventListener('animationend', later);
     };
-  }, [drop, path, theme]);
+  }, [drop, path, theme, wired]);
   const name = basename(path);
   const dot = name.lastIndexOf('.');
   const stem = dot > 0 ? name.slice(0, dot) : name;
@@ -659,7 +661,7 @@ function NoteTitle({ path, toNote, note, alone }: { path: string; toNote: () => 
   };
   return (
     <div ref={headRef} className={`rich-head${drop === null ? '' : ' is-beside'}`}>
-      <canvas ref={wires} className="title-wires" aria-hidden="true" />
+      {wired && <canvas ref={wires} className="title-wires" aria-hidden="true" />}
       <div ref={ref} className="rich-title" contentEditable="plaintext-only" suppressContentEditableWarning spellCheck={false} role="textbox" aria-label="Note title"
         style={drop === null ? undefined : { top: drop }}
         onBlur={() => { void commit(); }}

@@ -1179,6 +1179,18 @@ function registerIpc() {
     ]);
     menu.popup({ window: win ?? undefined, callback: () => setTimeout(() => resolve(null), 50) });
   }));
+  // A right-click menu the page describes (the top row's): rows with an id and a label, anything else a line.
+  ipcMain.handle('app:menu', (e, items: unknown) => new Promise<string | null>((resolve) => {
+    if (process.env.ASTROLABE_TEST) { resolve(testMenuChoice); testMenuChoice = null; return; }
+    const win = BrowserWindow.fromWebContents(e.sender);
+    const rows = (Array.isArray(items) ? items : []).slice(0, 40) as ({ id?: unknown; label?: unknown; enabled?: unknown } | null)[];
+    const menu = Menu.buildFromTemplate(rows.map((it) => {
+      if (!it || typeof it.id !== 'string' || typeof it.label !== 'string') return { type: 'separator' as const };
+      const id = it.id;
+      return { label: it.label.slice(0, 80), enabled: it.enabled !== false, click: () => resolve(id) };
+    }));
+    menu.popup({ window: win ?? undefined, callback: () => setTimeout(() => resolve(null), 50) });
+  }));
   ipcMain.on('app:closeWindow', (e) => BrowserWindow.fromWebContents(e.sender)?.close());
   ipcMain.on('clipboard:write', (_e, text: string) => clipboard.writeText(text));
   ipcMain.handle('clipboard:read', () => clipboard.readText());

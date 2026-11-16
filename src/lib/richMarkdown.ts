@@ -22,6 +22,7 @@ import '@milkdown/kit/prose/view/style/prosemirror.css';
 import type * as monacoNs from 'monaco-editor';
 import { appInfo, dirname } from './api';
 import { openLink } from './links';
+import { collapseLinks } from './richCollapse';
 import { closeLinkBox, showLinkBox } from './richLink';
 import { emojiFor } from './monaco';
 import { caret, copyLines, deleteLines, lineBelow, moveLines, pairs, selectLines } from './richEditing';
@@ -386,7 +387,7 @@ export async function mountRich(root: HTMLElement, model: monacoNs.editor.ITextM
       });
     })
     // > makes a toggle here, so the preset's own rule for it (a quote) is left out; so is its heading rule, for the one in richHashes.ts.
-    .use(commonmark.filter((plugin) => plugin !== wrapInBlockquoteInputRule && plugin !== wrapInHeadingInputRule)).use(gfm.filter((plugin) => plugin !== strikethroughInputRule && plugin !== wrapInTaskListInputRule)).use(notion).use(hashMark).use(headingRule)
+    .use(commonmark.filter((plugin) => plugin !== wrapInBlockquoteInputRule && plugin !== wrapInHeadingInputRule)).use(gfm.filter((plugin) => plugin !== strikethroughInputRule && plugin !== wrapInTaskListInputRule)).use(notion).use(collapseLinks).use(hashMark).use(headingRule)
     .use(history).use(linkPaste).use(clipboard).use(listener).use(extras).use(pairs).use(notionRules).use(emojiRule).use(symbolRules).use(linkRule).use(clicks).use(tickMotion).use(cutLine).use(joinNotes).use(hashes).use(imageView).use(imageDrops).use(motion).use(shift).use(drawnSelection).use(caret)
     .create();
 

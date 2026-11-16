@@ -17,6 +17,7 @@ import { api, loadAppInfo } from './lib/api';
 import { carried, loadHandoff, markLive, resumed } from './lib/handoff';
 import { applyHeadingFont, applyNotesFont, loadGoogleFont } from './lib/fonts';
 import { useStore } from './lib/store';
+import './lib/untitled'; // empty untitled notes are cleared away once you are off them
 
 // xterm's GPU renderer builds its font string with a leading space, which this
 // Chromium rejects, leaving glyphs at the canvas default of 10px. Trim it.

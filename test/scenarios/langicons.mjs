@@ -1,4 +1,4 @@
-// Code file tabs show an outline mark for their language (fileIcons.ts / Icons.tsx), which turns neon and pulses when
+// Code file tabs show their language's logo (fileIcons.ts / logos.ts / Icons.tsx), which turns neon and pulses when
 // the file is unsaved. Also checks the rendered note title colour and the rounded, slightly larger toggle chevron.
 import fs from 'node:fs';
 export default async function ({ page, run, type, work, shot }) {
@@ -15,7 +15,7 @@ export default async function ({ page, run, type, work, shot }) {
   for (const [name, body] of Object.entries(files)) fs.writeFileSync(`${work}/${name}`, body);
   await run(`cd ${work}`);
 
-  const open = async (q) => { await page.keyboard.press('Meta+p'); await page.waitForTimeout(300); await type(q); await page.keyboard.press('Enter'); await page.waitForTimeout(700); };
+  const open = async (q) => { await page.keyboard.press('Meta+o'); await page.waitForTimeout(300); await type(q); await page.keyboard.press('Enter'); await page.waitForTimeout(700); };
   // main.py and data.json already exist (drive.mjs). Open a spread of languages.
   for (const q of ['main.py', 'data.json', 'app.ts', 'lib.rs', 'calc.jl', 'style.css', 'index.html', 'app.js', 'run.sh']) await open(q);
 

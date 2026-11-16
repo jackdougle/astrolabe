@@ -105,3 +105,25 @@ export function moveLeaf(root: LayoutNode, pane: string, target: string | null, 
   const next = addLeaf(rest, pane, target, edge, id);
   return sameShape(next, root) ? root : next;
 }
+
+export const opposite = (e: Edge): Edge => (e === 'left' ? 'right' : e === 'right' ? 'left' : e === 'top' ? 'bottom' : 'top');
+export const across = (e: Edge) => e === 'left' || e === 'right';
+
+/** The side of a box a point is nearest, going by its diagonals: they cut the box into four triangles, one per side. */
+export function sideAt(r: Rect, x: number, y: number): Edge {
+  const dx = (x - r.x) / (r.w || 1) - 0.5;
+  const dy = (y - r.y) / (r.h || 1) - 0.5;
+  return Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? 'left' : 'right') : dy < 0 ? 'top' : 'bottom';
+}
+
+/** Where the terminals' area and the editors' area sit in the window, in percent of it, when both are open: the
+ *  editors are on `side` and the terminals take `ratio` of the way across (or down). `cut` is the line between them. */
+export function areaRects(both: boolean, ratio: number, side: Edge): { term: Rect; editor: Rect; cut: { dir: 'row' | 'col'; at: number } | null } {
+  const all = { x: 0, y: 0, w: 100, h: 100 };
+  if (!both) return { term: all, editor: all, cut: null };
+  const t = ratio * 100;
+  if (side === 'left') return { editor: { ...all, w: 100 - t }, term: { ...all, x: 100 - t, w: t }, cut: { dir: 'row', at: 100 - t } };
+  if (side === 'right') return { term: { ...all, w: t }, editor: { ...all, x: t, w: 100 - t }, cut: { dir: 'row', at: t } };
+  if (side === 'top') return { editor: { ...all, h: 100 - t }, term: { ...all, y: 100 - t, h: t }, cut: { dir: 'col', at: 100 - t } };
+  return { term: { ...all, h: t }, editor: { ...all, y: t, h: 100 - t }, cut: { dir: 'col', at: t } };
+}

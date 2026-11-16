@@ -41,14 +41,14 @@ export default async function ({ page, run, type, work }) {
   await page.waitForTimeout(900);
   console.log('5 whole editor closed → notes:', notes(), '| panes:', await page.evaluate(() => document.querySelectorAll('.pane').length));
 
-  // ⌘T's empty note beside a file is not touched
+  // ⌘T's empty note beside a file goes the same way (it was left alone until 2026-11-15)
   await page.click('.treerow:has-text("main.py")'); await page.waitForTimeout(900);
   await page.keyboard.press('Meta+t'); await page.waitForTimeout(1200);
   await close();
   console.log('6 ⌘T note closed empty → notes:', notes());
 
   // a note edited by something else while open is kept
-  fs.rmSync(`${work}/Untitled.md`); await page.waitForTimeout(300);
+  fs.rmSync(`${work}/Untitled.md`, { force: true }); await page.waitForTimeout(300);
   await fresh();
   fs.appendFileSync(`${work}/Untitled.md`, 'written by an agent\n'); await page.waitForTimeout(1500);
   await close();

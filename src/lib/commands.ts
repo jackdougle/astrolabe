@@ -245,7 +245,8 @@ export async function createEntry(dir: string, name: string) {
 export async function newFileBeside(path: string) {
   const res = await api.fs.newNote(isGraph(path) ? graphRoot(path) : dirname(path));
   if (res.error) { S().showToast(`Could not create a note: ${res.error}`); return; }
-  S().openFile(res.path, null, { keep: true });
+  // Marked like a ⌘N note: left or closed with nothing in it, it is deleted again (untitled.ts, dropBlankNotes).
+  S().openFile(res.path, null, { keep: true, blank: res.text ?? '' });
   bus.emit('fs.changed');
 }
 
@@ -292,6 +293,7 @@ function zoom(delta: number | null) {
 /** Brings Astrolabe up to date with its source folder. A change to the interface alone is built in about a
  *  second and the window reloads where it stands, terminals still running; more than that relaunches. */
 export async function updateApp() {
+  bus.emit('fs.changed'); // ⌘R also reads the navigator's folders again, whatever else it finds to do
   const status = await api.app.checkUpdate();
   if (status === 'current') { S().showToast('Astrolabe is up to date'); return; }
   if (status === 'busy') { S().showToast('Already updating…', 120000); return; }
@@ -346,9 +348,11 @@ export const commands: Command[] = [
     S().hideTerm(); refocus();
     if (hiddenTerms(S()).length > before) hideHint();
   } },
-  { id: 'term.showAll', title: 'Bring the hidden terminals back', keys: ['cmd+shift+u'], run: () => {
-    if (!hiddenTerms(S()).length) { S().showToast('No terminal is hidden'); return; }
-    S().showAllTerms(); refocus();
+  // Pressed again with nothing hidden, it hides the ones it just brought back: a look at them and away again.
+  { id: 'term.showAll', title: 'Bring the hidden terminals back (again: hide them again)', keys: ['cmd+shift+u'], run: () => {
+    if (hiddenTerms(S()).length) S().showAllTerms();
+    else if (!S().hideAgain()) { S().showToast('No terminal is hidden'); return; }
+    refocus();
   } },
   { id: 'pane.splitRight', title: 'Split right: a new terminal', keys: ['cmd+d'], run: () => { S().split('row'); refocus(); } },
   { id: 'pane.splitDown', title: 'Split down: a new terminal', keys: ['cmd+shift+d'], run: () => { S().split('col'); refocus(); } },
@@ -369,7 +373,7 @@ export const commands: Command[] = [
   // ⌘E shows the editors or puts them away. Unlike ⌃⌘F it never makes a file: with none open, the editor it shows asks for a name.
   { id: 'editor.toggle', title: 'Show or hide the editor', keys: ['cmd+e'], run: () => { S().toggleEditors(); refocus(); } },
   { id: 'editor.expand', title: 'Fill the window with the terminals or the editors, or put them side by side', keys: ['ctrl+cmd+f'], run: () => { toggleFull(); } },
-  { id: 'editor.swapSide', title: 'Switch displays (swap the editor and terminals left and right)', keys: ['ctrl+cmd+s'], when: bothAreas, run: () => { S().setEditorSide('toggle'); refocus(); } },
+  { id: 'editor.swapSide', title: 'Switch displays (swap the sides the editors and the terminals are on)', keys: ['ctrl+cmd+s'], when: bothAreas, run: () => { S().setEditorSide('toggle'); refocus(); } },
   { id: 'editor.left', title: 'Put the editor left of the terminals', keys: ['ctrl+cmd+arrowleft'], when: bothAreas, run: () => { S().setEditorSide('left'); refocus(); } },
   { id: 'editor.right', title: 'Put the editor right of the terminals', keys: ['ctrl+cmd+arrowright'], when: bothAreas, run: () => { S().setEditorSide('right'); refocus(); } },
   { id: 'tab.next', title: 'Next terminal tab', keys: ['ctrl+tab', 'cmd+shift+]'], run: () => { S().cycleTab(1); refocus(); } },
@@ -389,8 +393,8 @@ export const commands: Command[] = [
   { id: 'sidebar.toggle', title: 'Show or hide the file navigator', keys: ['cmd+l', 'cmd+b'], keyWhen: { 'cmd+b': () => !inRendered() }, run: () => { const open = !S().sidebar.visible; S().setSidebar({ visible: open, view: 'files' }); if (!open) refocus(); } },
   { id: 'sidebar.files', title: 'Show files', keys: ['cmd+shift+e'], run: () => S().setSidebar({ visible: true, view: 'files' }) },
   { id: 'sidebar.search', title: 'Search in project', keys: ['cmd+shift+f'], run: () => { S().setSidebar({ visible: true, view: 'search' }); bus.emit('search.focus'); } },
-  { id: 'palette.commands', title: 'Command palette', keys: ['cmd+shift+p'], run: () => S().openPalette('commands') },
-  { id: 'palette.files', title: 'Open file by name (Enter: in the editor you are in; ⌘Enter: in a new editor beside it)', keys: ['cmd+p', 'cmd+o'], run: () => S().openPalette('files') },
+  { id: 'palette.commands', title: 'Command palette', keys: ['cmd+p', 'cmd+shift+p'], run: () => S().openPalette('commands') },
+  { id: 'palette.files', title: 'Open file by name (Enter: in the editor you are in; ⌘Enter: in a new editor beside it)', keys: ['cmd+o'], run: () => S().openPalette('files') },
   { id: 'palette.history', title: 'Search command history', keys: ['ctrl+r'], when: () => !!term() && !term()!.running, run: () => S().openPalette('history') },
   { id: 'palette.themes', title: 'Change theme', run: () => S().openPalette('themes') },
   { id: 'palette.fontsNotes', title: 'Choose notes text font (Google Fonts)', run: () => S().openPalette('fonts-notes') },
@@ -416,7 +420,6 @@ export const commands: Command[] = [
   { id: 'editor.copyPath', title: 'Copy the full path of this file', keys: ['alt+cmd+c'], when: () => !!editor()?.active, run: () => { api.clipboard.write(editor()!.active!); S().showToast('Path copied'); } },
   { id: 'editor.uploadImages', title: 'Upload the pictures in this note', when: () => !!editor()?.active && isMarkdown(editor()!.active!), run: () => { void uploadNoteImages(editor()!.active!); } },
   { id: 'editor.save', title: 'Save file', keys: ['cmd+s'], when: () => !!editor()?.active, run: async () => { const e = editor()!; if (await saveFile(e.active!)) S().showToast('Saved'); } },
-  { id: 'editor.toggleWrap', title: 'Turn word wrap on or off', keys: ['alt+z'], run: () => { S().updateSettings({ wordWrap: !S().settings.wordWrap }); S().showToast(S().settings.wordWrap ? 'Word wrap on' : 'Word wrap off'); } },
   { id: 'editor.toggleCaret', title: 'Turn smooth caret on or off', run: () => { S().updateSettings({ smoothCaret: !S().settings.smoothCaret }); S().showToast(S().settings.smoothCaret ? 'Smooth caret on' : 'Smooth caret off'); } },
   { id: 'editor.toggleRendered', title: 'Switch Markdown between rendered and raw', keys: ['cmd+shift+r', 'cmd+shift+v'], when: () => !!editor()?.active && isMarkdown(editor()!.active!), run: () => { const e = editor()!; S().toggleRendered(e.id, e.active!); refocus(); } },
   // No key of its own: the notice at the top of the window (UpdateNotice in App.tsx) offers it whenever the source folder has changed.

@@ -4,13 +4,14 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import { SearchAddon } from '@xterm/addon-search';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { SerializeAddon } from '@xterm/addon-serialize';
-import { api, formatDuration, tildify } from './api';
+import { api, appInfo, formatDuration, joinPath, tildify } from './api';
 import { carried, carry } from './handoff';
 import { monoFont, pushHistory, refreshFiles } from './monaco';
 import { bus } from './panes';
 import { scrollSpeed, useStore } from './store';
 import { getTheme, xtermTheme } from './themes';
 import { fileTarget, openLink } from './links';
+import { findMentions, projectIndex, spacedPaths } from './termFiles';
 
 export interface Block {
   id: number;
@@ -900,17 +901,38 @@ export class TermSession {
       const t = fileTarget(m[0], cwd);
       if (t) candidates.push({ range, raw: m[0], at: m.index, ...t });
     }
-    const stats = await Promise.all(candidates.map((c) => api.fs.stat(c.path)));
-    candidates.forEach((c, i) => {
-      if (!stats[i].exists || stats[i].dir) return;
+    // What resolves from this folder, or is written out in full, is looked for on disk. The rest of what an agent
+    // writes (a path from some other folder of the project, a bare name, a name with spaces) is found in the list of
+    // the project's files (termFiles.ts). Where two readings overlap, the longer one is the file that was meant.
+    const pane = useStore.getState().panes[this.id];
+    const spaced = spacedPaths(text).map((sp) => ({ at: sp.at, raw: sp.raw, path: joinPath(cwd, sp.raw) }));
+    const [stats, spacedStats, index] = await Promise.all([
+      Promise.all(candidates.map((c) => api.fs.stat(c.path))),
+      Promise.all(spaced.map((sp) => api.fs.stat(sp.path))),
+      projectIndex((pane?.kind === 'terminal' && pane.gitRoot) || cwd).catch(() => null),
+    ]);
+    const files: { at: number; len: number; path: string; line?: number; col?: number }[] = [];
+    candidates.forEach((c, i) => { if (stats[i].exists && !stats[i].dir) files.push({ at: c.at, len: c.raw.length, path: c.path, line: c.line, col: c.col }); });
+    spaced.forEach((sp, i) => { if (spacedStats[i].exists && !spacedStats[i].dir) files.push({ at: sp.at, len: sp.raw.length, path: sp.path }); });
+    if (index) {
+      const mentions = findMentions(text, index, appInfo.home);
+      const there = await Promise.all(mentions.map((mention) => api.fs.stat(mention.path)));
+      mentions.forEach((mention, i) => { if (there[i].exists && !there[i].dir) files.push(mention); });
+    }
+    const taken: { at: number; len: number }[] = [];
+    for (const f of files.sort((a, b) => b.len - a.len)) {
+      if (taken.some((t) => f.at < t.at + t.len && t.at < f.at + f.len)) continue;
+      const range = onRow(f.at, f.len);
+      if (!range) continue;
+      taken.push(f);
       links.push({
-        range: c.range, text: c.raw, ...elsewhere(c.at, c.raw.length),
+        range, text: text.slice(f.at, f.at + f.len), ...elsewhere(f.at, f.len),
         activate: (ev: MouseEvent) => {
-          if (ev.metaKey) useStore.getState().openFile(c.path, c.line ? { line: c.line, col: c.col } : undefined);
+          if (ev.metaKey) useStore.getState().openFile(f.path, f.line ? { line: f.line, col: f.col } : undefined);
           else useStore.getState().showToast('Hold ⌘ and click to open the file');
         },
       });
-    });
+    }
     return links.length ? links : undefined;
   }
 

@@ -107,6 +107,8 @@ export default async function ({ page, shot, type, run, work }) {
   ok('⌘D then makes a new terminal, not a split of a hidden one', s.hidden === 3 && s.tabs === 1 && s.segs === 1 && s.onScreen === 'term+editor', JSON.stringify(s));
 
   // ⇧⌘U brings every one back.
+  const listed = () => page.evaluate(() => Object.values(window.__store.getState().panes).filter((p) => p.kind === 'terminal' && p.hidden).sort((a, b) => b.hidden - a.hidden).map((p) => p.id).join());
+  const wasHidden = await listed();
   await page.keyboard.press('Shift+Meta+u'); await at(900);
   s = await st();
   ok('⇧⌘U brings them all back', s.hidden === 0 && s.chip === null && s.terms === s.shells && s.focus === 'terminal', JSON.stringify(s));
@@ -118,8 +120,25 @@ export default async function ({ page, shot, type, run, work }) {
   const drawn = await page.evaluate((id) => { const el = document.querySelector(`.pane[data-pane="${id}"]`); const r = el?.getBoundingClientRect(); return !!r && r.width > 100 && getComputedStyle(el).visibility !== 'hidden'; }, loop);
   ok('and is drawn', drawn);
   await shot('hide-4-back');
+  // ⇧⌘U again, with nothing hidden since: the ones it brought back go again, and come back again.
+  await page.keyboard.press('Shift+Meta+u'); await at(900);
+  s = await st();
+  ok('⇧⌘U again hides the same terminals again, in the same order', s.hidden === 3 && s.chip === '3 hidden' && s.tabs === 1 && (await listed()) === wasHidden, `${JSON.stringify(s)} ${await listed()} / ${wasHidden}`);
+  const kept = ticks(); await at(700);
+  ok('still running', ticks() > kept);
+  await page.keyboard.press('Shift+Meta+u'); await at(900);
+  ok('and once more brings them back', (await st()).hidden === 0);
+  // One hidden by hand since then: only that one is brought back, and only that one goes again.
+  await hide();
+  const one = await listed();
+  await page.keyboard.press('Shift+Meta+u'); await at(900);
+  ok('after hiding one by hand, ⇧⌘U brings it back', (await st()).hidden === 0);
+  await page.keyboard.press('Shift+Meta+u'); await at(900);
+  ok('and again hides only that one', (await listed()) === one && !one.includes(','), `${await listed()} / ${one}`);
+  // Brought back by a click on its row instead, there is nothing for ⇧⌘U to hide again.
+  await page.evaluate((id) => window.__store.getState().showTerm(id), one); await at(600);
   await page.keyboard.press('Shift+Meta+u'); await at(300);
-  ok('with nothing hidden, ⇧⌘U says so', (await page.evaluate(() => document.querySelector('.toast')?.textContent)) === 'No terminal is hidden');
+  ok('with nothing hidden and nothing just brought back, ⇧⌘U says so', (await st()).hidden === 0 && (await page.evaluate(() => document.querySelector('.toast')?.textContent)) === 'No terminal is hidden');
 
   // A hidden terminal whose shell ends goes quietly.
   await page.evaluate((id) => window.__sessions.get(id).send('\x03'), loop); await at(700);
@@ -131,9 +150,9 @@ export default async function ({ page, shot, type, run, work }) {
   s = await st();
   ok('closing a hidden terminal changes nothing on screen', s.hidden === 0 && s.chip === null && s.terms === s.shells && s.tabs >= 1, JSON.stringify(s));
 
-  // The keyboard button at the foot of the navigator lists every hotkey.
-  await page.keyboard.press('Meta+l'); await at(600);
-  await page.click('.side-foot .side-keys'); await at(400);
+  // Settings lists every hotkey (the navigator's own keyboard button went on 2026-11-15).
+  await page.evaluate(() => window.__store.getState().openPalette('settings')); await at(300);
+  await page.click('.palette-row:has-text("Hotkeys")'); await at(400);
   const keys = await page.evaluate(() => [...document.querySelectorAll('.palette-row')].map((r) => `${r.querySelector('.palette-label').textContent} = ${r.querySelector('kbd')?.textContent}`));
   ok('the hotkeys button lists them', keys.length > 60 && keys.some((k) => k.endsWith('= ⌘U')) && keys.some((k) => k.endsWith('= ⇧⌘U')) && keys.some((k) => k.endsWith('= ⌘1–9')), `${keys.length} rows`);
   await shot('hide-5-hotkeys');

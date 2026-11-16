@@ -27,8 +27,9 @@ export default async function ({ app, page, shot, run, work }) {
     await p.mouse.move(to.x, to.y, { steps: 10 }); await p.waitForTimeout(450);
     const seen = { torn: await p.evaluate(() => !!document.querySelector('.is-torn')), ghost: await ghost(), grabbed: { x, y } };
     if (hold) await hold();
-    // Back inside, below the row: let go on the middle of another tab, it would join that tab (combine.mjs).
-    if (back) { await p.mouse.move(x + 60, y + 200, { steps: 6 }); await p.waitForTimeout(300); seen.ghostAfterBack = await ghost(); }
+    // Back inside, to its own place in the row: let go among the panes it would land there (dock.mjs), and on the
+    // middle of another tab it would join that tab (combine.mjs).
+    if (back) { await p.mouse.move(x + 20, y, { steps: 6 }); await p.waitForTimeout(300); seen.ghostAfterBack = await ghost(); }
     if (esc) await p.keyboard.press('Escape');
     await p.mouse.up(); await p.waitForTimeout(250);
     return seen;

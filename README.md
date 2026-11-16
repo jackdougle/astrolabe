@@ -13,6 +13,8 @@ npm run icon                 # redraw the app icon
 
 Settings live in `~/.astrolabe/settings.json`. ⌘, opens the file, and the gear at the bottom of the navigator has the common ones (themes, fonts, sizes, behaviour).
 
+The bar at the bottom of the navigator stays the same whatever the navigator shows: files, search, command palette and settings, centred on one line (a narrow navigator splits them evenly over two). The button that shows and hides the navigator is always at the left end of the top row, beside the window's own buttons. The list of files keeps itself up to date (it is read again every two seconds, and by ⌘R), so there is no reload button. The graph's button is with the view buttons at the top right, and the hotkeys are listed under Settings.
+
 ## The terminal
 
 zsh starts with Astrolabe's hooks added on top of your own startup files. The hooks mark where each command starts and ends, which is what gives you blocks, exit codes and the sticky command header. You type into an editor laid over the shell's cursor, so there's a smooth caret, grey suggestions from your history (Tab or → takes one) and emoji on `:`. Anything you type before the shell is ready gets held and put into the input once it is.
@@ -28,7 +30,10 @@ The window has two areas side by side, the terminals and the editors, and they d
 - A terminal tab holds one terminal or several (⌘D and ⇧⌘D split it). In the row along the top, a tab is one block of a fixed length with a segment for each of its terminals.
 - The first file you open brings up the editors, and closing the last one puts them away. You can have several editors side by side (⌘\), each with its own files.
 - A file opens in a temporary tab with its name in italics, and the next file you open takes its place. Saving it or double-clicking it keeps the tab.
-- Tabs and panes drag. Drag a tab along the row to reorder it, drag a file onto another editor to move it there, drag a pane by the short bar at its top edge to rearrange a split, or drag a tab out of the window to give it a window of its own. Shells keep running through all of this.
+- Tabs drag anywhere. Along the row a tab changes places. Carried down among the panes, a terminal's segment or a file's tab shows an outline of where it would land: over another pane, the half of it on the pointer's side; close to a wall, that whole side; over the other area (a terminal over the editors, a file over the terminals), that side of the window, so the terminals can sit beside, above or below the editors. Out of the window, a tab gets a window of its own. The short bar at a pane's top edge drags the same way. Shells keep running through all of this.
+- Right-click the top row, clear of the tabs, for something new in the area under the pointer: over the terminals a terminal (in a tab of its own, on the right, or below), over an editor a note or another editor.
+- A code file's tab shows its language's logo; notes show a page. Either turns neon while the file has unsaved changes.
+- An untitled note with nothing in it is deleted once it is out of sight: when its editor shows another file, or when the terminals take the whole window.
 - Terminal tabs combine. Drop a tab on the middle of another and its terminals join that tab, or right-click a tab and choose Combine with Current Tab. Right-click a terminal's segment for Move Terminal to Its Own Tab, or carry the terminal by its bar up to the row: onto a tab to join it, beside the tabs for a tab of its own.
 - Tabs move between windows. Drag a tab over another Astrolabe window and let go: on a terminal it lands against that terminal's nearest edge, on the row it becomes a tab, and a file opens in the editor under it. A window left empty closes.
 - ⌃⌘F lets the area you're in fill the window, and ⌃⌘S swaps the two sides.
@@ -37,7 +42,7 @@ The window has two areas side by side, the terminals and the editors, and they d
 
 ⌘U takes the terminal you're looking at off screen without stopping it. Whatever is running in it keeps running, and it keeps its place in its tab.
 
-While anything is hidden, a chip in the bottom right corner of the terminals says how many. Its terminal icon pulses while a command is running in one of them, like an agent working on a reply, and sits still otherwise. Click the chip for the list, and click a terminal in the list to bring it back where it was. ⇧⌘U brings them all back, and the first time you hide one a note at the top of the window reminds you of that key.
+While anything is hidden, a chip in the bottom right corner of the terminals says how many. Its terminal icon pulses while a command is running in one of them, like an agent working on a reply, and sits still otherwise. Click the chip for the list, and click a terminal in the list to bring it back where it was. ⇧⌘U brings them all back, and the first time you hide one a note at the top of the window reminds you of that key. Press ⇧⌘U again and the ones it brought back hide again, unless you have hidden something else in between.
 
 The window won't close while a terminal is hidden, and closing a tab leaves the terminals hidden in it alone. Quitting still ends them, like every other shell.
 
@@ -49,16 +54,16 @@ The keyboard button at the bottom of the navigator lists every hotkey, and you c
 |---|---|
 | ⌘T, ⌘D, ⇧⌘D | New terminal tab, split right, split down |
 | ⌘W, ⇧⌘W | Close the terminal or file you're in, close the whole tab |
-| ⌘U, ⇧⌘U | Hide this terminal, bring the hidden ones back |
+| ⌘U, ⇧⌘U | Hide this terminal, bring the hidden ones back (again: hide them again) |
 | ⌘1–9, ⌥⌘1–9 | Go to a terminal tab, go to an open file |
 | ⌥⌘arrows, ⌃` | Move between panes, jump between the editors and the terminals |
 | ⌘N, ⇧⌘N | New note in this project, new window |
-| ⌘O or ⌘P | Open a file by name. Notes only, last edited first. A dot in the search brings in other files |
-| ⌘L, ⇧⌘F, ⇧⌘P | File navigator, search in project, command palette |
+| ⌘O | Open a file by name. Notes only, last edited first. A dot in the search brings in other files |
+| ⌘L, ⇧⌘F, ⌘P | File navigator, search in project, command palette (⇧⌘P too) |
 | ⌘E, ⌘\ | Show or hide the editors, split the editor |
 | ⌃⌘F, ⌃⌘S, ⇧⌘↩ | Fill the window with one area, swap sides, maximize a pane |
 | ⌘G | The graph |
-| ⇧⌘R, ⌥Z | Markdown rendered or raw, word wrap |
+| ⇧⌘R | Markdown rendered or raw (lines always wrap; nothing scrolls sideways) |
 | ⌘K, ⌘F, ⇧⌘C | Clear the terminal, find in it, copy the last block's output |
 | ⇧⌘A or `/file` | Attach files. Dropping or pasting them on a terminal does the same |
 | ⌥↑ ⌥↓, ⇧⌘K, ⌃L, ⌘↩ | Move a line, delete it, select it, start a new one below |
@@ -70,7 +75,7 @@ Markdown opens rendered, and ⇧⌘R switches to raw. Both views edit the same t
 
 - The line keys, bracket pairs and smooth caret work the same in both views.
 - `[] ` starts a to-do, `> ` a toggle and `" ` a quote. Typing a different marker at the start of a list item converts it, along with the items after it.
-- `--` becomes a dash and `->` an arrow as you type. `[words](address)` becomes a link, and so does a URL pasted over a selection.
+- `--` becomes a dash and `->` an arrow as you type. `[words](address)` becomes a link, and so does a URL pasted over a selection. Link notation left as plain characters around an address that is already a link (`\[name]\(<address>)` in the file, which is what pasting formatted text can leave) shows as the name, linked.
 - A heading shows its `#`s only while the caret is on it. They're real text, so you can edit them to change the level.
 - The file name shows as the note's title, and editing the title renames the file.
 - Drop or paste a picture and it goes into the note. It's copied into `attachments/` beside the note, or uploaded if you've set `imageUpload`.
@@ -88,6 +93,7 @@ Three settings each name a command of yours. They're empty by default, so nothin
 
 - `noteTemplate` prints what a new note starts with.
 - `onFileClose` runs when a file's last tab closes, with the file's path as its last argument. It can move or change the file, and its last line of output is shown as a message.
+- An untitled note with nothing in it (`Untitled.md`, `Untitled 2.md`, …: only white space, or just what `noteTemplate` printed) is deleted and its tab closed as soon as you are off it, meaning its editor is showing another file, or when it is closed. One with unsaved typing or a name of its own is kept, and `onFileClose` is not run for a note cleared this way. See `src/lib/untitled.ts`.
 - `imageUpload` takes a picture's path and prints a web address, which the note then uses. `scripts/upload-image.sh` does this for a Vercel Blob store.
 
 ## Updating

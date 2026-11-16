@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { createPortal } from 'react-dom';
 import { carried, carry } from '../lib/handoff';
 import { api, basename, dirname, tildify } from '../lib/api';
-import { createEntry, dropEntries, moveEntries, renameEntry, trashEntries } from '../lib/commands';
+import { createEntry, dropEntries, moveEntries, renameEntry, runCommand, trashEntries } from '../lib/commands';
 import { exitDelay, reducedMotion } from '../lib/motion';
 import { bus, focusPane } from '../lib/panes';
 import { focusedId, projectRoot, SidebarView, useStore } from '../lib/store';
@@ -33,10 +33,6 @@ export function Sidebar() {
 function SidebarPanel({ open }: { open: boolean }) {
   const sidebar = useStore((s) => s.sidebar);
   const setSidebar = useStore((s) => s.setSidebar);
-  const views: { id: SidebarView; icon: string; label: string }[] = [
-    { id: 'files', icon: 'files', label: 'Files' },
-    { id: 'search', icon: 'search', label: 'Search in project' },
-  ];
   const startResize = (e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX; const startW = sidebar.width;
@@ -54,9 +50,10 @@ function SidebarPanel({ open }: { open: boolean }) {
       <div className="sidebar-clip">
         <aside className="sidebar" style={{ width: sidebar.width }}>
           <div className="sidebar-body">
-            {sidebar.view === 'files' && <FileTree views={views} />}
-            {sidebar.view === 'search' && <SearchPanel views={views} />}
+            {sidebar.view === 'files' && <FileTree />}
+            {sidebar.view === 'search' && <SearchPanel />}
           </div>
+          <SideFoot />
         </aside>
       </div>
       {open && <div className="sidebar-resize" onMouseDown={startResize} />}
@@ -64,15 +61,32 @@ function SidebarPanel({ open }: { open: boolean }) {
   );
 }
 
-type Views = { id: SidebarView; icon: string; label: string }[];
-function ViewSwitch({ views }: { views: Views }) {
+/** The bar at the foot of the navigator: the same buttons in the same places whatever the navigator shows, as in
+ *  Obsidian's ribbon. Where to look (files, search), then the app's own (every command, settings). A new note is ⌘N
+ *  or a right-click on the top row, opening a file by name is ⌘O, the hotkeys are listed under Settings, and the graph's button is with
+ *  the view buttons at the top right. They sit centred on one line; a navigator too narrow for that gets them on as
+ *  few lines as will hold them, the same number on each. */
+const FOOT: { icon: string; label: string; command: string; view?: SidebarView; cls?: string }[] = [
+  { icon: 'files', label: 'Files', command: 'sidebar.files', view: 'files' },
+  { icon: 'search', label: 'Search in project', command: 'sidebar.search', view: 'search' },
+  { icon: 'command', label: 'Command palette', command: 'palette.commands' },
+  { icon: 'gear', label: 'Settings', command: 'palette.settings', cls: 'side-settings' },
+];
+/** A button is 24px wide with 4px between it and the next, and the bar has 10px either side. */
+const FOOT_STEP = 28;
+function SideFoot() {
   const view = useStore((s) => s.sidebar.view);
+  const width = useStore((s) => s.sidebar.width);
+  const fits = Math.max(1, Math.floor((width - 20 + 4) / FOOT_STEP));
+  const perLine = Math.ceil(FOOT.length / Math.ceil(FOOT.length / fits));
   return (
-    <>
-      {views.filter((v) => v.id !== view).map((v) => (
-        <button key={v.id} {...tip(v.label, `sidebar.${v.id}`)} onClick={() => useStore.getState().setSidebar({ view: v.id })}><Icon name={v.icon} size={16} /></button>
-      ))}
-    </>
+    <div className="side-foot">
+      <div className="side-foot-row" style={{ '--per-line': perLine } as React.CSSProperties}>
+        {FOOT.map((b) => (
+          <button key={b.command} className={`${b.cls ?? ''}${b.view === view ? ' is-on' : ''}`} {...tip(b.label, b.command)} onClick={() => runCommand(b.command)}><Icon name={b.icon} size={16} /></button>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -105,7 +119,7 @@ function Fold({ open, ready = true, children }: { open: boolean; ready?: boolean
   return <div ref={ref} className={`tree-kids${full ? ' is-open' : ''}`}><div>{children()}</div></div>;
 }
 
-function FileTree({ views }: { views: Views }) {
+function FileTree() {
   const root = useStore((s) => projectRoot(s));
   const openFile = useStore((s) => s.openFile);
   // The file in the editor used last: its row is lit, and the folders it is in are opened so that it shows.
@@ -265,6 +279,28 @@ function FileTree({ views }: { views: Views }) {
   useEffect(() => { setChildren({}); setSelected([]); anchor.current = null; reload(); }, [root]);
   useEffect(() => carry('tree', () => openRef.current), []);
   useEffect(() => bus.on('fs.changed', reload), [reload]);
+  // The list keeps itself up to date: the folders on show are read again every couple of seconds while the window is
+  // on screen, so a file an agent or another program makes, moves or deletes shows without being asked for. (There is
+  // no reload button; ⌘R still reads everything again.) A folder whose list has not changed is left as it is.
+  useEffect(() => {
+    let busy = false;
+    const same = (a: Entry[] | undefined, b: Entry[]) => !!a && a.length === b.length && a.every((e, i) => e.path === b[i].path && e.dir === b[i].dir);
+    const look = async () => {
+      if (busy || document.hidden) return;
+      busy = true;
+      try {
+        const dirs = [root, ...Object.entries(openRef.current).filter(([dir, isOpen]) => isOpen && dir.startsWith(root + '/')).map(([dir]) => dir)];
+        const lists = await Promise.all(dirs.map((dir) => api.fs.readDir(dir) as Promise<Entry[]>));
+        setChildren((c) => {
+          let next = c;
+          dirs.forEach((dir, i) => { if (Array.isArray(lists[i]) && !same(c[dir], lists[i])) next = { ...next, [dir]: lists[i] }; });
+          return next;
+        });
+      } catch { /* a folder that has gone is dealt with by the next full reload */ } finally { busy = false; }
+    };
+    const timer = window.setInterval(look, 2000);
+    return () => window.clearInterval(timer);
+  }, [root]);
   // A renamed folder stays expanded under its new name.
   useEffect(() => bus.on('fs.renamed', ({ from, to }: { from: string; to: string }) => {
     const move = (k: string) => (k === from || k.startsWith(from + '/') ? to + k.slice(from.length) : k);
@@ -335,16 +371,10 @@ function FileTree({ views }: { views: Views }) {
     <div className="filetree" onContextMenu={(ev) => onMenu(ev, null)}>
       <div className="side-title">
         <span title={tildify(root)}>{basename(root)}</span>
+        <button className={showHidden ? 'is-on' : ''} {...tip(showHidden ? 'Hide dotfiles' : 'Show dotfiles')} onClick={() => setShowHidden(!showHidden)}><Icon name="eye" size={15} /></button>
       </div>
       <div className={`tree-scroll${drag?.dir === root ? ' is-drop' : ''}`} ref={listRef} onClick={() => { if (!dragged.current) setSelected([]); }}>{renderDir(root, 0)}</div>
       {drag && createPortal(<div className="tree-drag" style={{ transform: `translate(${drag.x + 12}px, ${drag.y + 8}px)` }}>{drag.label}</div>, document.body)}
-      <div className="side-foot">
-        <SettingsButton />
-        <KeysButton />
-        <button className={showHidden ? 'is-on' : ''} {...tip(showHidden ? 'Hide dotfiles' : 'Show dotfiles')} onClick={() => setShowHidden(!showHidden)}><Icon name="eye" size={16} /></button>
-        <button {...tip('Reload')} onClick={reload}><Icon name="refresh" size={16} /></button>
-        <ViewSwitch views={views} />
-      </div>
     </div>
   );
 }
@@ -373,7 +403,7 @@ function RenameField({ initial, onDone }: { initial: string; onDone: (name: stri
 
 interface SearchFile { path: string; matches: { line: number; col: number; len: number; text: string }[] }
 
-function SearchPanel({ views }: { views: Views }) {
+function SearchPanel() {
   const root = useStore((s) => projectRoot(s));
   const openFile = useStore((s) => s.openFile);
   const [query, setQuery] = useState('');
@@ -435,16 +465,7 @@ function SearchPanel({ views }: { views: Views }) {
           </div>
         ))}
       </div>
-      <div className="side-foot"><SettingsButton /><KeysButton /><ViewSwitch views={views} /></div>
     </div>
   );
 }
 
-function SettingsButton() {
-  return <button {...tip('Settings', 'palette.settings')} onClick={() => useStore.getState().openPalette('settings')}><Icon name="gear" size={16} /></button>;
-}
-
-/** Opens the list of every hotkey. */
-function KeysButton() {
-  return <button className="side-keys" {...tip('Hotkeys')} onClick={() => useStore.getState().openPalette('keys')}><Icon name="keyboard" size={16} /></button>;
-}

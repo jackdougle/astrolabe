@@ -37,6 +37,6 @@ export default async function ({ page, shot, run, work }) {
   await page.click('.treerow:has-text("notes")'); await page.waitForTimeout(60); await page.click('.treerow:has-text("notes")');
   await page.waitForTimeout(500);
   console.log('after a double toggle:', JSON.stringify(await kids('notes')));
-  await page.click('.side-foot [data-tip="Reload"]'); await page.waitForTimeout(500);
+  await page.click('.side-title [data-tip="Reload"]'); await page.waitForTimeout(500);
   console.log('after the list reloads:', JSON.stringify(await kids('notes')));
 }
