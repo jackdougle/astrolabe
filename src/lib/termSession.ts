@@ -1,4 +1,5 @@
 import { Terminal, IMarker } from '@xterm/xterm';
+import type { FontWeight } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { SearchAddon } from '@xterm/addon-search';
@@ -8,8 +9,10 @@ import { api, appInfo, formatDuration, joinPath, tildify } from './api';
 import { carried, carry } from './handoff';
 import { monoFont, pushHistory, refreshFiles } from './monaco';
 import { bus } from './panes';
-import { scrollSpeed, useStore } from './store';
-import { getTheme, xtermTheme } from './themes';
+import { outputWeight, scrollSpeed, useStore } from './store';
+import { findColor, getTheme, mix as mixHex, xtermTheme, termContrast } from './themes';
+import { seedOf } from './find';
+import type { Finder, Found } from './find';
 import { fileTarget, openLink } from './links';
 import { findMentions, projectIndex, spacedPaths } from './termFiles';
 
@@ -80,6 +83,7 @@ export class TermSession {
   readonly host: HTMLDivElement;
   private fit = new FitAddon();
   private search = new SearchAddon();
+  private finding = false; // ⌘F's bar is open on this terminal
   private serializer = new SerializeAddon();
   /** Settles once the terminal is ready to show: at once, or when a reloaded window's screen is back in place. */
   ready: Promise<void> = Promise.resolve();
@@ -90,6 +94,8 @@ export class TermSession {
   private uncarry: () => void = () => {};
   private layer: HTMLDivElement;
   private opened = false;
+  /** The screen another page left is still being drawn, at the size it had there. */
+  private resuming = false;
   private spawned = false;
   /** Settles when the main process has answered for the shell just started; null once it has. */
   private spawning: Promise<void> | null = null;
@@ -144,11 +150,11 @@ export class TermSession {
       ...(snap ? { cols: snap.cols, rows: snap.rows } : {}),
       allowProposedApi: true,
       fontFamily: monoFont(), fontSize: st.settings.fontSize, lineHeight: 1.32,
-      // Output keeps the weights its program asks for: regular, and bold where marked.
-      fontWeight: '400', fontWeightBold: '700',
+      // Output keeps the weights its program asks for: plain text (a setting: regular, medium or semibold), and bold where marked.
+      fontWeight: outputWeight(st.settings) as FontWeight, fontWeightBold: '700',
       cursorBlink: true, cursorStyle: 'bar', cursorWidth: 2, cursorInactiveStyle: 'none', allowTransparency: true,
       scrollback: 20000, scrollSensitivity: scrollSpeed(st.settings), fastScrollSensitivity: scrollSpeed(st.settings) * 4, macOptionClickForcesSelection: true, drawBoldTextInBrightColors: false,
-      theme: xtermTheme(getTheme(st.settings.theme)),
+      theme: xtermTheme(getTheme(st.settings.theme)), minimumContrastRatio: termContrast(getTheme(st.settings.theme)),
       // Links a program marks itself (OSC 8): Claude Code sends files as file:// links with a #L line.
       linkHandler: {
         allowNonHttpProtocols: true,
@@ -237,6 +243,10 @@ export class TermSession {
   /** Draws the screen the last page left and takes its shell back, which never stopped. */
   private resume(snap: TermSnap) {
     this.spawned = true;
+    // The screen was written down at the old size, so it is drawn at that size and only then fitted to the room
+    // here (a tab moved to another window can land in a narrower pane). Fitted first, its rows would wrap into
+    // each other until the program drew them again.
+    this.resuming = true;
     this.native = snap.native; this.state = snap.state; this.booted = snap.booted; this.promptSeen = snap.promptSeen;
     this.awaitingPrompt = snap.awaitingPrompt; this.submitted = snap.submitted; this.agentBusy = snap.agentBusy;
     this.early = snap.early; this.earlyEnter = snap.earlyEnter; this.resumedInput = snap.input; this.nonce = snap.nonce ?? null;
@@ -256,7 +266,9 @@ export class TermSession {
       });
       if (snap.rest) this.term.write(snap.rest);
       this.term.write('', () => {
+        this.resuming = false;
         if (this.disposed) { done(); return; }
+        this.refit();
         if (!snap.atBottom) this.term.scrollToLine(snap.viewportY);
         if (this.current) this.tick = window.setInterval(() => this.schedule(), 1000);
         this.emit('blocks');
@@ -295,7 +307,7 @@ export class TermSession {
   }
 
   refit() {
-    if (this.disposed || !this.opened || this.host.offsetWidth < 8 || this.host.offsetHeight < 8) return;
+    if (this.disposed || this.resuming || !this.opened || this.host.offsetWidth < 8 || this.host.offsetHeight < 8) return;
     const next = this.fit.proposeDimensions();
     if (this.native && this.spawned && this.state === 'prompt' && next && next.cols !== this.term.cols) {
       // Your prompt is on screen and the width is about to change. A full-width prompt line would wrap
@@ -328,10 +340,20 @@ export class TermSession {
     requestAnimationFrame(() => { if (!this.disposed && this.opened) this.term.refresh(0, this.term.rows - 1); });
   }
 
+  /** The terminal's colours. While ⌘F's bar is open the selection is drawn in the colour of the current match: the
+   *  search keeps the match it is on selected, and the selection is painted over the marks. */
+  private colours(themeId?: string) {
+    const t = getTheme(themeId ?? useStore.getState().settings.theme);
+    const now = mixHex(findColor(t), t.bg, t.dark ? 0.4 : 0.15);
+    return this.finding ? { ...xtermTheme(t), selectionBackground: now, selectionInactiveBackground: now } : xtermTheme(t);
+  }
+
   applyAppearance(themeId?: string) {
     const st = useStore.getState();
-    this.term.options.theme = xtermTheme(getTheme(themeId ?? st.settings.theme));
+    this.term.options.theme = this.colours(themeId);
+    this.term.options.minimumContrastRatio = termContrast(getTheme(themeId ?? st.settings.theme));
     this.term.options.fontSize = st.settings.fontSize;
+    this.term.options.fontWeight = outputWeight(st.settings) as FontWeight;
     this.term.options.scrollSensitivity = scrollSpeed(st.settings);
     this.term.options.fastScrollSensitivity = scrollSpeed(st.settings) * 4;
     const family = monoFont();
@@ -775,12 +797,36 @@ export class TermSession {
 
   // ---------- find ----------
 
-  find(query: string, dir: 1 | -1 = 1) {
-    const t = getTheme(useStore.getState().settings.theme);
-    const opts = { incremental: dir === 1, decorations: { matchBackground: t.selection, matchOverviewRuler: t.faint, activeMatchBackground: t.accent + '99', activeMatchColorOverviewRuler: t.accent } };
-    return dir === 1 ? this.search.findNext(query, opts) : this.search.findPrevious(query, opts);
+  /** ⌘F's searcher for this terminal (find.ts): every match in the screen and the scrollback is marked, and the
+   *  search starts from the newest line and goes up. */
+  finder(report: (f: Found) => void): Finder {
+    let query = '';
+    const marks = () => {
+      const t = getTheme(useStore.getState().settings.theme);
+      const amber = findColor(t);
+      return { decorations: { matchBackground: mixHex(amber, t.bg, 0.72), matchOverviewRuler: amber, activeMatchBackground: mixHex(amber, t.bg, t.dark ? 0.4 : 0.15), activeMatchColorOverviewRuler: amber } };
+    };
+    const sub = this.search.onDidChangeResults((r) => report({ count: r.resultCount, at: r.resultIndex + 1 }));
+    const go = (dir: 1 | -1) => (dir === 1 ? this.search.findNext(query, marks()) : this.search.findPrevious(query, marks()));
+    this.finding = true;
+    this.term.options.theme = this.colours();
+    return {
+      find: (q) => {
+        query = q;
+        this.term.clearSelection(); // so the search starts again from the newest line
+        if (!q) { this.search.clearDecorations(); report({ count: 0, at: 0 }); return; }
+        if (!go(-1)) report({ count: 0, at: 0 });
+      },
+      step: (dir) => { if (query) go(dir); },
+      place: () => {},
+      end: () => {
+        sub.dispose(); this.finding = false;
+        if (this.disposed) return;
+        this.search.clearDecorations(); this.term.clearSelection(); this.term.options.theme = this.colours();
+      },
+      selection: () => seedOf(this.term.getSelection()),
+    };
   }
-  clearFind() { this.search.clearDecorations(); this.term.clearSelection(); }
 
   // ---------- links ----------
 
@@ -851,12 +897,16 @@ export class TermSession {
     while (last - (y - 1) < 8 && continues(last)) last++;
     let text = '';
     const cells: { x: number; y: number }[] = [];
+    // Where a row a program broke itself was joined to the one above. That is a guess: the row may as well
+    // have ended between two words, so file names are looked for both ways (see `apart` below).
+    const guessed: number[] = [];
     for (let r = first; r <= last; r++) {
       const line = buf.getLine(r);
       if (!line) break;
       const soft = !!buf.getLine(r + 1)?.isWrapped && r < last;
       const t = line.translateToString(!soft);
       const from = r > first && !line.isWrapped ? t.length - t.trimStart().length : 0; // drop the indent of a broken line
+      if (r > first && !line.isWrapped) guessed.push(text.length);
       for (let i = from; i < t.length; i++) { text += t[i]; cells.push({ x: i + 1, y: r + 1 }); }
     }
     if (!text.trim()) return undefined;
@@ -893,31 +943,47 @@ export class TermSession {
     const cwd = this.cwd();
     const SUFFIX = String.raw`(?::\d+(?::\d+)?|#L\d+(?:C\d+)?(?:-L?\d+)?)?`;
     const pathRe = new RegExp(String.raw`(?:file:\/\/)?(?:~|\.{1,2})?(?:\/[\w.@+\-%]+)+${SUFFIX}|[\w.@+\-]+(?:\/[\w.@+\-]+)+${SUFFIX}|[\w@+\-][\w.@+\-]*\.[A-Za-z]\w{0,7}${SUFFIX}`, 'g');
-    const candidates: { range: any; raw: string; at: number; path: string; line?: number; col?: number }[] = [];
-    while ((m = pathRe.exec(text)) && candidates.length < 12) {
-      if (/^https?:?$/.test(m[0]) || text.slice(Math.max(0, m.index - 3), m.index).includes('://') && !m[0].startsWith('file:')) continue;
-      const range = onRow(m.index, m[0].length);
-      if (!range) continue;
-      const t = fileTarget(m[0], cwd);
-      if (t) candidates.push({ range, raw: m[0], at: m.index, ...t });
-    }
     // What resolves from this folder, or is written out in full, is looked for on disk. The rest of what an agent
     // writes (a path from some other folder of the project, a bare name, a name with spaces) is found in the list of
     // the project's files (termFiles.ts). Where two readings overlap, the longer one is the file that was meant.
     const pane = useStore.getState().panes[this.id];
-    const spaced = spacedPaths(text).map((sp) => ({ at: sp.at, raw: sp.raw, path: joinPath(cwd, sp.raw) }));
-    const [stats, spacedStats, index] = await Promise.all([
-      Promise.all(candidates.map((c) => api.fs.stat(c.path))),
-      Promise.all(spaced.map((sp) => api.fs.stat(sp.path))),
-      projectIndex((pane?.kind === 'terminal' && pane.gitRoot) || cwd).catch(() => null),
-    ]);
-    const files: { at: number; len: number; path: string; line?: number; col?: number }[] = [];
-    candidates.forEach((c, i) => { if (stats[i].exists && !stats[i].dir) files.push({ at: c.at, len: c.raw.length, path: c.path, line: c.line, col: c.col }); });
-    spaced.forEach((sp, i) => { if (spacedStats[i].exists && !spacedStats[i].dir) files.push({ at: sp.at, len: sp.raw.length, path: sp.path }); });
-    if (index) {
-      const mentions = findMentions(text, index, appInfo.home);
-      const there = await Promise.all(mentions.map((mention) => api.fs.stat(mention.path)));
-      mentions.forEach((mention, i) => { if (there[i].exists && !there[i].dir) files.push(mention); });
+    const index = await projectIndex((pane?.kind === 'terminal' && pane.gitRoot) || cwd).catch(() => null);
+    type Found = { at: number; len: number; path: string; line?: number; col?: number };
+    /** The files `text` names, by where in it they are named. */
+    const filesIn = async (text: string): Promise<Found[]> => {
+      const candidates: { raw: string; at: number; path: string; line?: number; col?: number }[] = [];
+      let m: RegExpExecArray | null;
+      pathRe.lastIndex = 0;
+      while ((m = pathRe.exec(text)) && candidates.length < 12) {
+        if (/^https?:?$/.test(m[0]) || text.slice(Math.max(0, m.index - 3), m.index).includes('://') && !m[0].startsWith('file:')) continue;
+        const t = fileTarget(m[0], cwd);
+        if (t) candidates.push({ raw: m[0], at: m.index, ...t });
+      }
+      const spaced = spacedPaths(text).map((sp) => ({ at: sp.at, raw: sp.raw, path: joinPath(cwd, sp.raw) }));
+      const mentions = index ? findMentions(text, index, appInfo.home) : [];
+      const [stats, spacedStats, there] = await Promise.all([
+        Promise.all(candidates.map((c) => api.fs.stat(c.path))),
+        Promise.all(spaced.map((sp) => api.fs.stat(sp.path))),
+        Promise.all(mentions.map((mention) => api.fs.stat(mention.path))),
+      ]);
+      const found: Found[] = [];
+      candidates.forEach((c, i) => { if (stats[i].exists && !stats[i].dir) found.push({ at: c.at, len: c.raw.length, path: c.path, line: c.line, col: c.col }); });
+      spaced.forEach((sp, i) => { if (spacedStats[i].exists && !spacedStats[i].dir) found.push({ at: sp.at, len: sp.raw.length, path: sp.path }); });
+      mentions.forEach((mention, i) => { if (there[i].exists && !there[i].dir) found.push(mention); });
+      return found;
+    };
+    const files = await filesIn(text);
+    if (guessed.length) {
+      // The other way to read rows a program broke: each as a line of its own, so a name that ends one row is not
+      // run into the word that starts the next ("notes/plan.md" + "and"). A name found this way lies within one
+      // row, and its place in the joined text is the same less the line breaks put in before it.
+      let apart = '';
+      guessed.forEach((at, i) => { apart += `${text.slice(i ? guessed[i - 1] : 0, at)}\n`; });
+      apart += text.slice(guessed[guessed.length - 1]);
+      for (const f of await filesIn(apart)) {
+        const before = apart.slice(0, f.at).split('\n').length - 1;
+        if (!apart.slice(f.at, f.at + f.len).includes('\n')) files.push({ ...f, at: f.at - before });
+      }
     }
     const taken: { at: number; len: number }[] = [];
     for (const f of files.sort((a, b) => b.len - a.len)) {

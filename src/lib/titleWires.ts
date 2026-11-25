@@ -13,6 +13,9 @@ export interface WireScene {
    *  around them: its text, CSS font, where it starts, its baseline, and the transform it is drawn under (a to f).
    *  Without it they leave from the edges of `title`. */
   glyphs?: { text: string; font: string; x: number; baseline: number; matrix: number[] };
+  /** A title with no characters at all: where its first letter would stand, the traces come in from all the way
+   *  round and meet at this point. `r` is the radius of the round space they cross straight before they spread. */
+  mark?: { x: number; y: number; r: number };
   /** What the traces keep out of: each line of the note's text, and anything else that is in it. */
   blocks: Box[];
   seed: string;
@@ -48,6 +51,7 @@ interface Trace { cells: [number, number][]; end: 'via' | 'pin' | 'fade'; pulse:
 
 const INK = 96; // how opaque a pixel has to be to count
 const PAD = 4; // the clear space a line keeps from the letters it runs past, in pixels
+const HUB = 2.4; // the radius of the via an empty title's lines meet at
 const GAP = 1.5; // the hairline left between a letter and the line that starts at it
 const CLOSE = 9; // hollows and gaps narrower than about twice this are filled in: the inside of an n, the space between two letters
 const NEAR = 10; // a line lands on a letter only where nothing within this far to either side of it...
@@ -61,30 +65,36 @@ let inkCache: { key: string; ink: Ink | null } | null = null;
  *  and 0 outside, over a stretch of the grid that starts at (x0, y0). Null when there is nothing to draw. */
 function inkOf(scene: WireScene): Ink | null {
   const g = scene.glyphs;
-  if (!g || !g.text.trim()) return null;
-  const key = JSON.stringify([g, scene.title]);
+  const m = scene.mark;
+  if (!m && (!g || !g.text.trim())) return null;
+  const key = JSON.stringify([g, m, scene.title]);
   if (inkCache?.key === key) return inkCache.ink; // the note changes far more often than its title
   const made = ((): Ink | null => {
     const pad = PITCH * 3;
-    const x0 = Math.max(0, Math.floor((scene.title.left - pad) / PITCH) * PITCH), y0 = Math.max(0, Math.floor((scene.title.top - pad) / PITCH) * PITCH);
-    const w = Math.ceil((scene.title.right + pad - x0) / PITCH) * PITCH, h = Math.ceil((scene.title.bottom + pad - y0) / PITCH) * PITCH;
+    const t = m ? { left: Math.min(scene.title.left, m.x - m.r), top: Math.min(scene.title.top, m.y - m.r), right: Math.max(scene.title.right, m.x + m.r), bottom: Math.max(scene.title.bottom, m.y + m.r) } : scene.title;
+    const x0 = Math.max(0, Math.floor((t.left - pad) / PITCH) * PITCH), y0 = Math.max(0, Math.floor((t.top - pad) / PITCH) * PITCH);
+    const w = Math.ceil((t.right + pad - x0) / PITCH) * PITCH, h = Math.ceil((t.bottom + pad - y0) / PITCH) * PITCH;
     if (w <= 0 || h <= 0 || w * h > 4e6) return null;
     const canvas = document.createElement('canvas');
     canvas.width = w; canvas.height = h;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return null;
-    const [a, b, c, d, e, f] = g.matrix;
-    /** The words with `grow` pixels added all round, as 1 or 0 a pixel. */
+    /** The words (or the mark) with `grow` pixels added all round, as 1 or 0 a pixel. */
     const grown = (grow: number) => {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, w, h);
-      ctx.setTransform(a, b, c, d, e - x0, f - y0);
-      ctx.font = g.font;
-      ctx.textBaseline = 'alphabetic';
-      ctx.lineJoin = 'round';
-      ctx.lineWidth = grow * 2;
-      ctx.fillText(g.text, g.x, g.baseline);
-      ctx.strokeText(g.text, g.x, g.baseline);
+      if (m) {
+        ctx.beginPath(); ctx.arc(m.x - x0, m.y - y0, m.r + grow, 0, Math.PI * 2); ctx.fill();
+      } else if (g) {
+        const [a, b, c, d, e, f] = g.matrix;
+        ctx.setTransform(a, b, c, d, e - x0, f - y0);
+        ctx.font = g.font;
+        ctx.textBaseline = 'alphabetic';
+        ctx.lineJoin = 'round';
+        ctx.lineWidth = grow * 2;
+        ctx.fillText(g.text, g.x, g.baseline);
+        ctx.strokeText(g.text, g.x, g.baseline);
+      }
       const data = ctx.getImageData(0, 0, w, h).data;
       const out = new Uint8Array(w * h);
       for (let i = 0; i < out.length; i++) out[i] = data[i * 4 + 3] > INK ? 1 : 0;
@@ -149,7 +159,9 @@ function layOut(scene: WireScene, ink: Ink | null): Trace[] {
   const shutCells = (ca: number, cb: number, ra: number, rb: number, as: number) => {
     for (let r = Math.max(0, ra); r <= Math.min(rows - 1, rb); r++) for (let c = Math.max(0, ca); c <= Math.min(cols - 1, cb); c++) shut[r * cols + c] = as;
   };
-  shutCells(c0, c1, r0, r1, 2); // 2: the title's block, which only a stub may be laid in, and only where it is empty
+  // 2: the title's block, which only a stub may be laid in, and only where it is empty. A mark has no block: its lines
+  // leave it all the way round, so the corners of the square it sits in are open ground.
+  if (!scene.mark) shutCells(c0, c1, r0, r1, 2);
   // A cell is the text's when its middle is.
   for (const b of scene.blocks) shutCells(Math.ceil(b.left / PITCH - 0.5), Math.floor(b.right / PITCH - 0.5), Math.ceil(b.top / PITCH - 0.5), Math.floor(b.bottom / PITCH - 0.5), 1);
   const taken = new Uint8Array(cols * rows);
@@ -305,7 +317,46 @@ function layOut(scene: WireScene, ink: Ink | null): Trace[] {
     made.from = from;
     traces.push(made);
   };
+  /** A title with no letters: lines run in like spokes from all the way round and meet in its middle. As with
+   *  letters, only those heading left, down-left or down run on and snake away; the rest, over the top and off to
+   *  the right, are short stubs that bend after a cell or two. */
+  const radiate = (m: { x: number; y: number; r: number }) => {
+    const SPOKES = 16;
+    const ring = m.r + GAP;
+    const longs = new Set([S, 3, W]);
+    for (let i = 0; i < SPOKES; i++) {
+      const own = rng(`s${i}`);
+      const pick = picker(own);
+      const a = (i / SPOKES) * Math.PI * 2; // 0 is east, and on round the way the clock goes
+      // A spoke halfway between two headings takes one of them: one that may run on, when either may.
+      const near = [Math.floor(i / 2) % 8, Math.ceil(i / 2) % 8];
+      const can = near.filter((d) => longs.has(d));
+      const heading = can.length ? can[Math.floor(own() * can.length)] : near[Math.floor(own() * near.length)];
+      const long = can.length > 0;
+      if (own() < (long ? 0.1 : 0.28)) continue;
+      // Out along the spoke to the first cell clear of the mark: the line runs straight in from there to the ring.
+      const ux = Math.cos(a), uy = Math.sin(a);
+      let c = -1, r = -1;
+      for (let d = ring; d < ring + PITCH * 4; d++) {
+        const cc = Math.floor((m.x + ux * d) / PITCH), rr = Math.floor((m.y + uy * d) / PITCH);
+        if (cc < 0 || rr < 0 || cc >= cols || rr >= rows) break;
+        if (!inked[rr * cols + cc]) { c = cc; r = rr; break; }
+      }
+      if (c < 0) continue;
+      const from: [number, number] = [m.x + ux * HUB, m.y + uy * HUB]; // every line runs straight in to the middle
+      if (long) {
+        ceiling = r0; wall = c1 + 1; stub = false; // below the mark's top, and never out past its right side
+        add(run(c, r, snake(own, heading, reach, 0), Math.floor(reach * (0.3 + own() * 0.65)), own), [], from);
+      } else {
+        ceiling = 1; wall = cols - 1; stub = true;
+        const bend = turn(heading, own() < 0.5 ? 1 : -1);
+        add(run(c, r, [{ dir: heading, len: pick(1, 2) }, { dir: bend, len: pick(1, 3) }], 5, own, 3), [], from);
+      }
+    }
+    ceiling = 1; wall = cols - 1; stub = false;
+  };
   const reach = Math.max(18, Math.floor(Math.min(scene.width * 0.6, 640) / PITCH));
+  if (scene.mark && lettered) { radiate(scene.mark); return traces; }
   const room = cols - 1 - c1; // cells to the right of the title
   // The left side of the word gives the pins of the left edge. They leave in bundles: the lines of a bundle make the
   // same turns, so they stay side by side, and stop one after another. They keep below the title's top.
@@ -440,10 +491,12 @@ export function drawWires(canvas: HTMLCanvasElement, scene: WireScene) {
     ctx.lineWidth = 1;
     path(points);
     ctx.stroke();
-    // Where it leaves the title: a pin, a little heavier than the line.
-    const [px, py] = points[1];
-    const ang = Math.atan2(py - y0, px - x0);
-    ctx.save(); ctx.translate(x0, y0); ctx.rotate(ang); ctx.fillRect(-0.4, -1, 3.4, 2); ctx.restore();
+    // Where it leaves the title: a pin, a little heavier than the line. (Lines that meet in an empty title's middle have none.)
+    if (!scene.mark) {
+      const [px, py] = points[1];
+      const ang = Math.atan2(py - y0, px - x0);
+      ctx.save(); ctx.translate(x0, y0); ctx.rotate(ang); ctx.fillRect(-0.4, -1, 3.4, 2); ctx.restore();
+    }
     // Where it stops: a via (a ring with its hole), a terminal like the one it starts with, or nothing.
     if (trace.end === 'via') {
       ctx.lineWidth = 1.1;
@@ -466,8 +519,8 @@ export function drawWires(canvas: HTMLCanvasElement, scene: WireScene) {
       path(lit); ctx.stroke();
     }
   }
-  // Nothing is left on the letters themselves: not the soft edge of a line, nor its bloom.
-  if (letters) {
+  // Nothing is left on the letters themselves: not the soft edge of a line, nor its bloom. (An empty title has none.)
+  if (letters && !scene.mark) {
     const stamp = document.createElement('canvas');
     stamp.width = letters.w; stamp.height = letters.h;
     const image = new ImageData(letters.w, letters.h);
@@ -478,6 +531,7 @@ export function drawWires(canvas: HTMLCanvasElement, scene: WireScene) {
     ctx.drawImage(stamp, letters.x0, letters.y0);
     ctx.restore();
   }
+  if (scene.mark) drawMark(ctx, scene.mark, scene);
   // Everything fades with its distance from the word: quickly at first, then a long faint tail.
   const cx = (scene.title.left + scene.title.right) / 2;
   const cy = (scene.title.top + scene.title.bottom) / 2;
@@ -495,6 +549,23 @@ export function drawWires(canvas: HTMLCanvasElement, scene: WireScene) {
   let sum = 0;
   for (const trace of traces) for (const [c, r] of trace.cells) sum = (Math.imul(sum, 31) + c * 131 + r) >>> 0;
   return `${traces.length}:${sum}:${traces.filter((trace) => trace.from).length}`; // the last: how many start at a letter
+}
+
+/** Where the lines of an empty title meet: a small via in the middle, with a faint glow. Nothing else. */
+function drawMark(ctx: CanvasRenderingContext2D, m: { x: number; y: number; r: number }, scene: WireScene) {
+  const A = scene.strength;
+  const col = (c: string, a: number) => `rgba(${c}, ${Math.min(1, a)})`;
+  ctx.save();
+  ctx.translate(m.x, m.y);
+  const glow = ctx.createRadialGradient(0, 0, 0, 0, 0, HUB * 4);
+  glow.addColorStop(0, col(scene.mid, A * 0.7));
+  glow.addColorStop(1, col(scene.mid, 0));
+  ctx.fillStyle = glow;
+  ctx.beginPath(); ctx.arc(0, 0, HUB * 4, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = col(scene.near, A * 1.6);
+  ctx.lineWidth = 1.1;
+  ctx.beginPath(); ctx.arc(0, 0, HUB, 0, Math.PI * 2); ctx.stroke();
+  ctx.restore();
 }
 
 /** A CSS colour as "r, g, b". */

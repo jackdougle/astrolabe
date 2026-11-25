@@ -7,7 +7,8 @@ import { carry, docking } from '../lib/dock';
 import { graphRoot, isGraph } from '../lib/graph';
 import { fileIconName } from '../lib/fileIcons';
 import { markBooted, reducedMotion, useEntering } from '../lib/motion';
-import { monoFont, refreshFiles, setMonacoTheme } from '../lib/monaco';
+import { fileEntry, monoFont, refreshFiles, setMonacoTheme } from '../lib/monaco';
+import { subscribe as onChanges, waiting } from '../lib/review';
 import { richHooks } from '../lib/richMarkdown';
 import { bus, focusPane, paneHandles } from '../lib/panes';
 import { EditorPane as EditorPaneState, EDITORS, fileKey, focusedId, hiddenTerms, isMarkdown, liveEditors, openFiles, Pane, scrollSpeed, showing, shownTerms, Tab, tabGroups, TermPane, termLabel, useStore } from '../lib/store';
@@ -16,6 +17,7 @@ import { Landing, landing, onBlock, Over } from '../lib/movein';
 import { canTear, TEAR_EDGE, tearSpec, Torn } from '../lib/tearoff';
 import { getTheme } from '../lib/themes';
 import { EditorPane } from './EditorPane';
+import { useGlass } from '../lib/glass';
 import { Icon } from './Icons';
 import { tip, Tooltip } from './Tooltip';
 import { Palette } from './Palette';
@@ -104,9 +106,12 @@ export function App() {
   // Once the opening layout is on screen, new tabs and panes animate in.
   useEffect(() => { if (ready) { const t = window.setTimeout(markBooted, 300); return () => window.clearTimeout(t); } }, [ready]);
 
+  // Without the top bar (⇧⌘B) the window's own buttons go too, so nothing sits over the panes' top corner.
+  useEffect(() => { api.app.windowButtons?.(settings.topBar !== false); }, [settings.topBar]);
+
   if (!ready) return null;
   return (
-    <div className={`app${fullscreen ? ' is-fullscreen' : ''}`}>
+    <div className={`app${fullscreen ? ' is-fullscreen' : ''}${settings.topBar === false ? ' no-topbar' : ''}`}>
       {settings.starfield && <Starfield />}
       <TabStrip />
       <div className="app-body">
@@ -551,6 +556,8 @@ function FileRow({ pane, leaving, dirty, files, focused, onScreen }: { pane: Edi
  *  shows; dragged out of the window it becomes a window of its own. */
 function FileTab({ pane, path, temp, dirty, hint, active, shown, leaving }: { pane: string; path: string; /** A temporary tab: the next file opened takes its place. A double click keeps it. */ temp: boolean; dirty: boolean; /** The keys that bring it to the front. */ hint?: string; active: boolean; shown: boolean; leaving: boolean }) {
   const [entering, entered] = useEntering();
+  // Changes made to it from outside are waiting to be looked at (review.ts).
+  const changes = useSyncExternalStore(onChanges, () => waiting(fileEntry(path)?.model));
   const close = () => closeFileTab(pane, path);
   // A code file shows its language's mark, a little larger than the page a note shows.
   const icon = isGraph(path) ? 'graph' : fileIconName(path);
@@ -594,7 +601,7 @@ function FileTab({ pane, path, temp, dirty, hint, active, shown, leaving }: { pa
       onAnimationEnd={entered} onContextMenu={onMenu} onMouseDown={down} onDoubleClick={() => useStore.getState().keepFile(path, pane)}
       onAuxClick={(e) => { if (e.button === 1) close(); }}>
       {/* A file with unsaved changes has no mark of its own: its page glows and pulses, as a terminal's dot does while it works. */}
-      <span className={`tab-file${lang ? ' is-lang' : ''}${dirty ? ' is-dirty' : ''}`} title={dirty ? 'Unsaved changes' : undefined}><Icon name={icon} size={lang ? 14 : 12} /></span>
+      <span className={`tab-file${lang ? ' is-lang' : ''}${dirty ? ' is-dirty' : ''}${changes ? ' has-changes' : ''}`} title={dirty ? 'Unsaved changes' : changes ? 'Changed from outside: look it over' : undefined}><Icon name={icon} size={lang ? 14 : 12} /></span>
       <span className="toptab-text"><span className="top-app filetab-name">{isGraph(path) ? 'Graph' : basename(path)}</span></span>
       {hint && <span className="toptab-key" data-key={hint} />}
       <button className={`toptab-close filetab-close${dirty ? ' is-dirty' : ''}`} {...tip(dirty ? 'Unsaved changes. Close without saving' : 'Close', active ? 'pane.close' : undefined)}
@@ -745,6 +752,11 @@ function enterOffset(node: LayoutNode, id: string): React.CSSProperties | undefi
   return enterOffset(node.a, id) ?? enterOffset(node.b, id);
 }
 
+/** How panes are arranged, leaving out how the room is shared between them: dragging a divider does not change it. */
+function shapeOf(node: LayoutNode): string {
+  return node.type === 'leaf' ? node.pane : `(${node.dir} ${shapeOf(node.a)} ${shapeOf(node.b)})`;
+}
+
 /** One arrangement of panes: a terminal tab's terminals, or the editors (`id` is EDITORS). */
 function PaneTree({ id: tree, root, activePane, maximized, active, focused }: { id: string; root: LayoutNode; activePane: string; maximized: boolean; /** It is the one its area shows. */ active: boolean; /** Its area has the keyboard. */ focused: boolean }) {
   const panes = useStore((s) => s.panes);
@@ -758,6 +770,15 @@ function PaneTree({ id: tree, root, activePane, maximized, active, focused }: { 
   const liveRoot = useMemo(() => { const out = new Set(off.split('\n')); return keepLeaves(root, (id) => !leaving[id] && !out.has(id)) ?? root; }, [root, leaving, off]);
   const { panes: rects, dividers } = useMemo(() => computeLayout(liveRoot), [liveRoot]);
   const ids = useMemo(() => leaves(root).slice().sort(), [root]);
+  // The same panes in a new arrangement: one was carried to another place. Gliding there, panes full of text would
+  // pass through each other, so they take their new places at once and the one that was carried comes in as a new one does.
+  const shape = useMemo(() => ({ how: shapeOf(liveRoot), who: leaves(liveRoot).slice().sort().join('\n') }), [liveRoot]);
+  const [was, setWas] = useState(shape);
+  const [placed, setPlaced] = useState<string | null>(null);
+  if (was.how !== shape.how) {
+    setWas(shape);
+    if (was.who === shape.who && !reducedMotion()) setPlaced(activePane);
+  }
   const carried = useDocking()?.pane;
   const split = rects.length > 1;
   const rectOf = (id: string) => (rects.find((r) => r.pane === id) ?? full.panes.find((r) => r.pane === id))!.rect;
@@ -826,6 +847,7 @@ function PaneTree({ id: tree, root, activePane, maximized, active, focused }: { 
         const isActive = active && focused && id === activePane;
         return (
           <PaneBox key={id} id={id} isActive={isActive} split={split} leaving={gone} away={away} offset={enterOffset(root, id)}
+            again={placed === id} onAgain={() => setPlaced(null)}
             moving={carried === id} onGrab={split && !maximized && !gone ? grab(id) : undefined}
             style={{ left: `${r.x}%`, top: `${r.y}%`, width: `${r.w}%`, height: `${r.h}%`, visibility: hidden ? 'hidden' : undefined }}>
             {pane.kind === 'terminal' ? <TerminalPane pane={pane} active={isActive || !split} /> : <EditorPane pane={pane} active={isActive || !split} />}
@@ -847,8 +869,8 @@ function paneMin(id: string) {
   return { w: 48, h: Math.ceil(useStore.getState().settings.fontSize * 1.55) + 43 };
 }
 
-function PaneBox({ id, isActive, split, leaving, away, moving, onGrab, offset, style, children }: {
-  id: string; isActive: boolean; split: boolean; leaving: boolean; /** A hidden terminal. */ away: boolean; moving: boolean; onGrab?: (e: React.MouseEvent) => void;
+function PaneBox({ id, isActive, split, leaving, away, again, onAgain, moving, onGrab, offset, style, children }: {
+  id: string; isActive: boolean; split: boolean; leaving: boolean; /** A hidden terminal. */ away: boolean; /** It was carried to a new place in its arrangement. */ again: boolean; onAgain: () => void; moving: boolean; onGrab?: (e: React.MouseEvent) => void;
   offset?: React.CSSProperties; style: React.CSSProperties; children: React.ReactNode;
 }) {
   const [made, entered] = useEntering();
@@ -856,28 +878,17 @@ function PaneBox({ id, isActive, split, leaving, away, moving, onGrab, offset, s
   const [back, setBack] = useState(false);
   const was = useRef(away);
   useLayoutEffect(() => { if (was.current && !away && !reducedMotion()) setBack(true); was.current = away; }, [away]);
-  const entering = made || back;
+  const entering = made || back || again;
   return (
     <div className={`pane${isActive ? ' is-active' : ''}${split ? ' is-split' : ''}${entering ? ' is-entering' : ''}${leaving ? ' is-leaving' : ''}${moving ? ' is-moving' : ''}`} data-pane={id}
-      style={entering ? { ...style, ...offset } : style} onAnimationEnd={(e) => { entered(e); if (e.target === e.currentTarget) setBack(false); }}
+      style={entering ? { ...style, ...offset } : style} onAnimationEnd={(e) => { entered(e); if (e.target === e.currentTarget) { setBack(false); if (again) onAgain(); } }}
+      // A pane that has glided to its new size is done changing: its terminal takes the new size now, not a moment later.
+      onTransitionEnd={(e) => { if (e.target === e.currentTarget) getSession(id)?.refit(); }}
       onMouseDownCapture={() => { if (!isActive) { useStore.getState().focusPane(id); requestAnimationFrame(() => paneHandles.get(id)?.focus()); } }}>
       {children}
       {onGrab && <div className="pane-grip" {...tip('Drag to move this pane')} onMouseDown={onGrab} />}
     </div>
   );
-}
-
-/** Where the typing caret is on screen, whatever holds the keyboard: a terminal (xterm keeps its hidden input at the
- *  cursor), the command input or raw editor (Monaco), a rendered note. Null when nothing is being typed into. */
-function caretBox(): DOMRect | null {
-  const el = document.activeElement as HTMLElement | null;
-  if (!el || el === document.body) return null;
-  if (el.classList.contains('xterm-helper-textarea')) return el.getBoundingClientRect();
-  const drawn = el.closest('.monaco-editor')?.querySelector('.cursors-layer .cursor') ?? el.closest('.markdown')?.querySelector('.rich-caret');
-  if (drawn) return drawn.getBoundingClientRect();
-  const sel = window.getSelection();
-  if (sel?.rangeCount && el.contains(sel.focusNode)) { const r = sel.getRangeAt(0).getBoundingClientRect(); if (r.width || r.height) return r; }
-  return null;
 }
 
 /** The terminals taken off screen with ⌘U: a chip in the bottom right corner of the terminals, there while any are
@@ -898,39 +909,8 @@ function HiddenTerms({ right, bottom }: { right: number | null; /** How far the 
     window.addEventListener('mousedown', press, true); window.addEventListener('keydown', key, true);
     return () => { window.removeEventListener('mousedown', press, true); window.removeEventListener('keydown', key, true); };
   }, [open]);
-  // Typing with the caret close by turns the chip to glass, so the words show through it; moving the pointer brings it back.
-  const [clear, setClear] = useState(false);
-  useEffect(() => {
-    if (!list.length || open) { setClear(false); return; }
-    let frame = 0;
-    const look = () => {
-      frame = 0;
-      const chip = ref.current?.querySelector('.hidden-chip')?.getBoundingClientRect();
-      const caret = caretBox();
-      // A caret that cannot be found for a moment (it is redrawn as the keys go in) changes nothing.
-      if (!chip || !caret) return;
-      // Within a few words of it on the same lines, either side. Once it has turned to glass the caret has to go a
-      // little further off before it comes back, so typing along the edge of that reach does not flick it to and fro.
-      setClear((was) => { const far = was ? 50 : 0; return caret.right > chip.left - 90 - far && caret.left < chip.right + 40 + far && caret.bottom > chip.top - 26 - far / 2 && caret.top < chip.bottom + 26 + far / 2; });
-    };
-    // Looked at as the keys go in, and once more when they stop: the drawn caret glides, so it gets there a little late.
-    let settle = 0;
-    const key = (e: KeyboardEvent) => {
-      if (['Meta', 'Control', 'Alt', 'Shift'].includes(e.key)) return;
-      if (!frame) frame = requestAnimationFrame(() => { frame = requestAnimationFrame(look); });
-      window.clearTimeout(settle);
-      settle = window.setTimeout(look, 220);
-    };
-    // Only a pointer that has really moved: the page reports a move of its own when what is under a still pointer changes.
-    let at: { x: number; y: number } | null = null;
-    const move = (e: MouseEvent) => {
-      const was = at;
-      at = { x: e.screenX, y: e.screenY };
-      if (was && Math.abs(was.x - at.x) + Math.abs(was.y - at.y) > 2) setClear(false);
-    };
-    window.addEventListener('keydown', key, true); window.addEventListener('mousemove', move, true);
-    return () => { cancelAnimationFrame(frame); window.clearTimeout(settle); window.removeEventListener('keydown', key, true); window.removeEventListener('mousemove', move, true); };
-  }, [list.length, open]);
+  // Typing right next to it turns the chip to glass, so the words show through it; moving the pointer brings it back.
+  const clear = useGlass(ref, '.hidden-chip', list.length > 0 && !open);
   if (!list.length) return null;
   // A command is running there and is not waiting for you: an agent at work, say. Its terminal mark pulses.
   const working = (p: TermPane) => p.running && !p.waiting;
@@ -939,20 +919,19 @@ function HiddenTerms({ right, bottom }: { right: number | null; /** How far the 
     <div className={`hidden-terms${right === null ? ' is-apart' : ''}${clear ? ' is-clear' : ''}`} ref={ref} style={{ ...(right === null ? { left: 12 } : { right: `calc(${right}% + 14px)` }), bottom: bottom > 0 ? `calc(${bottom}% + 7px)` : undefined }}>
       {open && (
         <div className="hidden-pop" role="menu" aria-label="Hidden terminals">
-          <div className="hidden-head">Hidden terminals, still running</div>
+          <div className="hidden-head"><span>Hidden terminals</span><kbd>{formatKeys('cmd+shift+u')}</kbd></div>
           {list.map((p) => {
             const l = termLabel(p);
             return (
-              <button key={p.id} className="hidden-row" role="menuitem" data-pane={p.id} title={`Bring back ${l.dir} ${l.app}`} onClick={() => show(p.id)}>
+              <button key={p.id} className="hidden-row" role="menuitem" data-pane={p.id} onClick={() => show(p.id)}>
                 <span className={`hidden-mark${working(p) ? ' is-working' : ''}`}><Icon name="terminal" size={13} /></span>
                 <span className="hidden-name"><span className="top-dir">{l.dir ? `${l.dir} ` : ''}</span><span className="top-app">{l.app}</span></span>
               </button>
             );
           })}
-          <button className="hidden-row hidden-all" role="menuitem" onClick={() => runCommand('term.showAll')}><span>Bring all back</span><kbd>{formatKeys('cmd+shift+u')}</kbd></button>
         </div>
       )}
-      <button className="hidden-chip" aria-expanded={open} {...tip('Hidden terminals. Bring them all back', 'term.showAll')} onClick={() => { setOpen(!open); if (open) focusFront(); }}>
+      <button className="hidden-chip" aria-expanded={open} {...tip('Hidden terminals', 'term.showAll')} onClick={() => { setOpen(!open); if (open) focusFront(); }}>
         <span className={`hidden-mark${list.some(working) ? ' is-working' : ''}`}><Icon name="terminal" size={13} /></span>{list.length} hidden
       </button>
     </div>

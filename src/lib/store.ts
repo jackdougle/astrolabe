@@ -50,6 +50,8 @@ export type PaletteMode = 'commands' | 'files' | 'history' | 'themes' | 'fonts-n
 
 export interface Settings {
   theme: string; zoom: number;
+  /** The theme in use before light mode was last switched on or off (⌘0), to go back to. */
+  themeBefore: string;
   fontSize: number;
   /** Text size of rendered notes, as a multiple of 14px. */
   notesSize: number;
@@ -58,6 +60,8 @@ export interface Settings {
   /** Weight of what you type in the terminal. Medium (500) is the floor; lighter values are raised to it.
    *  Program output is left alone, so replies can mix regular and bold. */
   fontWeight: number;
+  /** The weight of what programs print in a terminal (their bold stays bold): 400 regular, 500 medium, 600 semibold. */
+  outputWeight: number;
   /** Google Fonts family for the terminal and raw editor; empty means the built-in Commit Mono. */
   fontFamily: string;
   /** Google Fonts family for the text of rendered notes; empty means SF Pro, the system font. */
@@ -71,6 +75,8 @@ export interface Settings {
   startDirectory: string;
   /** Faint constellation lines behind everything. */
   starfield: boolean;
+  /** The row of tabs along the top of the window (⇧⌘B shows or hides it). */
+  topBar: boolean;
   /** The file's name shown at the top of a rendered note (click it to rename the file). */
   noteTitle: boolean;
   /** The circuit traces drawn running out from that title. */
@@ -94,14 +100,16 @@ export interface Settings {
   restoreSession: boolean;
   /** Files open in a temporary tab until they are saved or double-clicked. Off: every file opened gets a tab that stays. */
   previewTabs: boolean;
+  /** Changes made to an open file from outside the editor are marked in it, to be kept or undone, instead of only appearing. */
+  reviewChanges: boolean;
   /** How far a scroll gesture moves, as a multiple of the system's own distance. Applies to terminals, the editor, notes and the navigator. */
   scrollSpeed: number;
   /** Which side of the terminals the code and notes editor sits on. */
   editorSide: Edge;
 }
 export const DEFAULT_SETTINGS: Settings = {
-  theme: 'meridian', zoom: 1, fontSize: 12.5, notesSize: 1, sidebarSize: 12.67, fontWeight: 600, fontFamily: '', notesFont: '', headingFont: '',
-  wordWrap: true, smoothCaret: true, restoreSession: true, previewTabs: true, starfield: true, noteTitle: true, titleWires: true, startDirectory: '', imageUpload: '', noteTemplate: '', onFileClose: '',
+  theme: 'meridian', themeBefore: '', zoom: 1, fontSize: 12.5, notesSize: 1, sidebarSize: 12.67, fontWeight: 600, outputWeight: 500, fontFamily: '', notesFont: '', headingFont: '',
+  wordWrap: true, smoothCaret: true, restoreSession: true, previewTabs: true, reviewChanges: true, starfield: true, topBar: true, noteTitle: true, titleWires: true, startDirectory: '', imageUpload: '', noteTemplate: '', onFileClose: '',
   prompt: 'shell', opacityFocused: 0.95, opacityUnfocused: 0.89,
   chromeOpacityFocused: 1, chromeOpacityUnfocused: 0.94, scrollSpeed: 2.5, editorSide: 'right',
 };
@@ -217,6 +225,9 @@ function makeTerm(cwd: string): TermPane {
 
 /** What you type is never lighter than medium. */
 export const termWeight = (s: Settings) => String(Math.min(700, Math.max(500, Math.round((Number(s.fontWeight) || 600) / 100) * 100)));
+
+/** What programs print: regular to semibold, medium unless chosen otherwise. Bold text stays bold (700). */
+export const outputWeight = (s: Settings) => String(Math.min(600, Math.max(400, Math.round((Number(s.outputWeight) || 500) / 100) * 100)));
 
 /** The folder new terminal tabs open in. */
 export function startDir(s: Settings = useStore.getState().settings) {

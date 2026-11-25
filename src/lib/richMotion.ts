@@ -3,7 +3,7 @@
 // carried along by the layout, across line breaks too.
 //  - Brackets put around a selection grow in (richEditing.ts says which characters, with `motionKey`).
 //  - The * _ ` ~ typed around words shrink away when they turn into bold, italic, code or strike-through.
-//  - A heading's #s grow in as the caret enters it and shrink away as it leaves (richHashes.ts says where, with `motionKey`).
+//  - A heading's #s grow in as it is made and shrink away as the caret leaves it (richHashes.ts says where, with `motionKey`).
 //  - A list item indented or outdented (Tab, ⇧Tab, ⌘] and ⌘[) slides to its new place instead of jumping (`shift`).
 import { Plugin, PluginKey } from '@milkdown/kit/prose/state';
 import { Decoration, DecorationSet } from '@milkdown/kit/prose/view';

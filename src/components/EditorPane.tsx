@@ -1,15 +1,20 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { basename, dirname } from '../lib/api';
 import { closeFileTab, createEntry, noteLink, pickAndAttach, renameEntry } from '../lib/commands';
 import { count, Counts, plain } from '../lib/counts';
 import { graphRoot, isGraph } from '../lib/graph';
+import { useGlass } from '../lib/glass';
+import { monacoFinder } from '../lib/find';
 import { carried, carry } from '../lib/handoff';
 import { attachEmoji, contextValue, loadFile, loneColon, monaco, monoFont, overflowNode } from '../lib/monaco';
 import { bus, paneHandles } from '../lib/panes';
 import { pasteLink } from '../lib/rawMarkdown';
+import { keep as keepChanges, reviewVersion, spans as changeSpans, subscribe as onChanges, undo as undoChanges } from '../lib/review';
+import { attachReview, revealNext } from '../lib/reviewMonaco';
 import { drawWires, rgb } from '../lib/titleWires';
 import { mountRich, RichHandle } from '../lib/richMarkdown';
 import { EditorPane as EditorPaneState, focusedId, isMarkdown, projectRoot, scrollSpeed, useStore } from '../lib/store';
+import { FindBar } from './FindBar';
 import { GraphView } from './GraphView';
 
 const LIST_ITEM = /^(\s*)([-*+]|\d+[.)])(\s+)(\[[ xX]\]\s+)?/;
@@ -32,6 +37,39 @@ function handleWrapKey(editor: monaco.editor.IStandaloneCodeEditor, e: monaco.IK
   editor.executeEdits('wrap', at.map((p, i) => ({ range: monaco.Range.fromPositions(p), text: i % 2 ? close : key, forceMoveMarkers: true })),
     sels.map((s) => monaco.Selection.createWithDirection(s.startLineNumber, start(s.startLineNumber, s.startColumn), s.endLineNumber, end(s.endLineNumber, s.endColumn), s.getDirection())));
   editor.pushUndoStop();
+}
+
+/** ⌘U in raw Markdown with words selected: puts <u></u> around each selection, or takes it away again (the tags may be
+ *  inside the selection or just outside it). The words stay selected. False when there is nothing to underline. */
+function toggleUnderline(editor: monaco.editor.IStandaloneCodeEditor) {
+  const model = editor.getModel();
+  const sels = editor.getSelections() ?? [];
+  if (!model || model.getLanguageId() !== 'markdown' || !sels.length || sels.some((s) => s.isEmpty())) return false;
+  const OPEN = '<u>'; const CLOSE = '</u>';
+  const full = model.getValue();
+  // Each selection as offsets in the text as it is now, first to last.
+  const spans = sels.map((s) => [model.getOffsetAt(s.getStartPosition()), model.getOffsetAt(s.getEndPosition())]).sort((x, y) => x[0] - y[0]);
+  const edits: monaco.editor.IIdentifiedSingleEditOperation[] = [];
+  const words: [number, number][] = [];
+  let delta = 0;
+  for (const [a, b] of spans) {
+    const text = full.slice(a, b);
+    let from = a; let to = b; let put: string; let at: number;
+    if (text.length >= OPEN.length + CLOSE.length && text.toLowerCase().startsWith(OPEN) && text.toLowerCase().endsWith(CLOSE)) {
+      put = text.slice(OPEN.length, -CLOSE.length); at = 0;
+    } else if (full.slice(a - OPEN.length, a).toLowerCase() === OPEN && full.slice(b, b + CLOSE.length).toLowerCase() === CLOSE) {
+      from = a - OPEN.length; to = b + CLOSE.length; put = text; at = 0;
+    } else { put = OPEN + text + CLOSE; at = OPEN.length; }
+    edits.push({ range: monaco.Range.fromPositions(model.getPositionAt(from), model.getPositionAt(to)), text: put });
+    const start = from + delta + at;
+    words.push([start, start + (put.length - (at ? OPEN.length + CLOSE.length : 0))]);
+    delta += put.length - (to - from);
+  }
+  editor.pushUndoStop();
+  editor.executeEdits('underline', edits);
+  editor.setSelections(words.map(([x, y]) => { const p = model.getPositionAt(x); const q = model.getPositionAt(y); return new monaco.Selection(p.lineNumber, p.column, q.lineNumber, q.column); }));
+  editor.pushUndoStop();
+  return true;
 }
 
 /** ⇧⌘X in raw Markdown: puts ~~ around each selection (the word at the caret when nothing is selected), or takes it away again. */
@@ -161,6 +199,9 @@ export function EditorPane({ pane, active }: { pane: EditorPaneState; active: bo
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(0);
   const [richNote, setRichNote] = useState<string | null>(null);
+  const [finding, setFinding] = useState(false);
+  const [richUp, setRichUp] = useState(0); // counts the rendered views made, so ⌘F's bar knows a new one is there
+  const findWords = useRef('');
   const settings = useStore((s) => s.settings);
   // The editor fills its tab: nothing beside it, or expanded over the rest.
   const file = pane.files.find((f) => f.path === pane.active) ?? null;
@@ -203,14 +244,23 @@ export function EditorPane({ pane, active }: { pane: EditorPaneState; active: bo
     editor.onKeyDown((e) => {
       handleWrapKey(editor, e); handleListKey(editor, e);
       if (e.metaKey && e.shiftKey && !e.ctrlKey && !e.altKey && e.keyCode === monaco.KeyCode.KeyX) { e.preventDefault(); e.stopPropagation(); toggleStrike(editor); }
+      // ⌘U underlines the selected words (<u>words</u>); with nothing selected it hides the terminal (commands.ts).
+      if (e.metaKey && !e.shiftKey && !e.ctrlKey && !e.altKey && e.keyCode === monaco.KeyCode.KeyU && toggleUnderline(editor)) { e.preventDefault(); e.stopPropagation(); }
       // ⌃L selects the line, as ⌘L does in VS Code: here ⌘L copies the file's path (commands.ts).
       if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.keyCode === monaco.KeyCode.KeyL) { e.preventDefault(); e.stopPropagation(); editor.trigger('keyboard', 'expandLineSelection', null); }
     });
     attachEmoji(editor, () => ['markdown', 'plaintext'].includes(editor.getModel()?.getLanguageId() ?? ''));
+    const offReview = attachReview(editor);
     const onPaste = (e: ClipboardEvent) => { pasteLink(editor, e); };
     hostRef.current!.addEventListener('paste', onPaste, true);
     const host = hostRef.current!;
     paneHandles.set(pane.id, { focus: focusNow });
+    // ⌘F. The graph and the empty page have a box of their own to type in, and the keyboard goes there.
+    const offFind = bus.on('find.toggle', (id) => {
+      if (id !== pane.id) return;
+      if (other.current) { focusNow(); return; }
+      setFinding((on) => { if (on) requestAnimationFrame(focusNow); return !on; });
+    });
     // A window reloading in place keeps each file's caret and scroll position.
     type Kept = { views: [string, monaco.editor.ICodeEditorViewState | null][]; scroll: number };
     const kept = carried<Kept>(`editor:${pane.id}`);
@@ -234,7 +284,7 @@ export function EditorPane({ pane, active }: { pane: EditorPaneState; active: bo
       const range = hit ? { startLineNumber: hit.lineNumber, startColumn: hit.column, endLineNumber: hit.lineNumber, endColumn: hit.column } : editor.getSelection()!;
       editor.executeEdits('attach', [{ range, text, forceMoveMarkers: true }]);
     });
-    return () => { offAttach(); uncarry(); host.removeEventListener('paste', onPaste, true); paneHandles.delete(pane.id); editor.dispose(); editorRef.current = null; };
+    return () => { offReview(); offAttach(); offFind(); uncarry(); host.removeEventListener('paste', onPaste, true); paneHandles.delete(pane.id); editor.dispose(); editorRef.current = null; };
   }, [pane.id]);
 
   // Show the active file, keeping each file's scroll position and cursor.
@@ -296,14 +346,14 @@ export function EditorPane({ pane, active }: { pane: EditorPaneState; active: bo
     setRichNote(null);
     mountRich(root, model, (note) => { if (!cancelled) setRichNote(note); }).then((h) => {
       if (cancelled) { h.destroy(); return; }
-      handle = h; richHandle.current = h;
+      handle = h; richHandle.current = h; setRichUp((n) => n + 1);
       const r = useStore.getState().panes[pane.id];
       const reveal = r?.kind === 'editor' ? r.reveal : null;
       if (reveal?.end && reveal.path === pane.active && endDone.current !== reveal.n) { endDone.current = reveal.n; h.focusEnd(); }
       else if (isFocusedPane()) h.focus();
       if (keptScroll.current && root.parentElement) { root.parentElement.scrollTop = keptScroll.current; keptScroll.current = 0; }
     });
-    return () => { cancelled = true; handle?.destroy(); if (richHandle.current === handle) richHandle.current = null; root.textContent = ''; };
+    return () => { cancelled = true; handle?.destroy(); if (richHandle.current === handle) { richHandle.current = null; setRichUp((n) => n + 1); } root.textContent = ''; };
   }, [rendered, loaded, error]);
 
   useEffect(() => {
@@ -330,7 +380,49 @@ export function EditorPane({ pane, active }: { pane: EditorPaneState; active: bo
         {!file && <EmptyEditor />}
         {error && <div className="editor-error"><p>{error}</p><button onClick={() => closeFileTab(pane.id, pane.active!)}>Close this tab</button></div>}
       </div>
+      {finding && file && !graph && !error && <FindBar placeholder={isMarkdown(file.path) ? 'Find in note' : 'Find in file'} memory={findWords}
+        target={rendered ? `note:${richUp}` : 'text'} make={rendered ? (richHandle.current ? (report) => richHandle.current!.finder(report) : null) : (report) => monacoFinder(editorRef.current!, report)}
+        onClose={() => { setFinding(false); focusNow(); }} />}
       {file && !graph && !error && <WordCount editor={editorRef} rich={richRef} rendered={rendered} loaded={loaded} />}
+      {file && !graph && !error && <ChangesBar pane={pane.id} editor={editorRef} rich={richRef} rendered={rendered} loaded={loaded} />}
+    </div>
+  );
+}
+
+/** Shown at the foot of a file while changes made to it from outside are waiting to be looked at (review.ts): how
+ *  many, arrows to go from one to the next, and Keep all / Undo all. Each change has its own Keep and Undo beside it. */
+function ChangesBar({ pane, editor, rich, rendered, loaded }: { pane: string; editor: React.RefObject<monaco.editor.IStandaloneCodeEditor | null>; rich: React.RefObject<HTMLDivElement | null>; rendered: boolean; loaded: number }) {
+  useSyncExternalStore(onChanges, reviewVersion);
+  const at = useRef(-1);
+  const model = editor.current?.getModel() ?? null;
+  const list = changeSpans(model);
+  useEffect(() => { at.current = -1; }, [loaded]);
+  useEffect(() => bus.on('review.act', (arg: { pane: string; what: 'keep' | 'undo' | 'next' | 'prev' }) => {
+    if (arg.pane !== pane) return;
+    const m = editor.current?.getModel();
+    if (!m) return;
+    if (arg.what === 'keep') keepChanges(m); else if (arg.what === 'undo') undoChanges(m); else go(arg.what === 'prev');
+  }), [pane, rendered]);
+  const go = (back: boolean) => {
+    const ed = editor.current;
+    if (!ed) return;
+    if (!rendered) { revealNext(ed, back); ed.focus(); return; }
+    const boxes = [...(rich.current?.querySelectorAll<HTMLElement>('.rv-box') ?? [])];
+    if (!boxes.length) return;
+    at.current = (at.current + (back ? -1 : 1) + boxes.length * 2) % boxes.length;
+    boxes[at.current].scrollIntoView({ block: 'center', behavior: 'smooth' });
+  };
+  if (!model || !list.length) return null;
+  const offers = list.filter((s) => s.offer).length;
+  const made = list.length - offers;
+  const label = [made ? many(made, 'change') : '', offers ? `${num(offers)} on your unsaved lines` : ''].filter(Boolean).join(', ');
+  return (
+    <div className="changes-bar" role="toolbar" aria-label="Changes made outside the editor">
+      <span className="changes-n">{label}</span>
+      <button className="changes-step" title="Previous change" onClick={() => go(true)}>↑</button>
+      <button className="changes-step" title="Next change" onClick={() => go(false)}>↓</button>
+      <button className="rv-keep" title="Keep all (⌘K)" onClick={() => keepChanges(model)}>Keep all</button>
+      <button className="rv-undo" title="Undo all (⌥⌘N)" onClick={() => undoChanges(model)}>Undo all</button>
     </div>
   );
 }
@@ -389,6 +481,8 @@ function WordCount({ editor, rich, rendered, loaded }: { editor: React.RefObject
     return () => { document.removeEventListener('mousedown', press, true); document.removeEventListener('keydown', key, true); };
   }, [open]);
 
+  // Typing right next to it turns it to glass, so the words under it show; moving the pointer brings it back.
+  const clear = useGlass(ref, '.counts-chip', !!all && !open);
   if (!all) return null;
   const rows = (c: Counts) => (<>
     <b>{num(c.words)}</b><span>{c.words === 1 ? 'word' : 'words'}</span>
@@ -398,7 +492,7 @@ function WordCount({ editor, rich, rendered, loaded }: { editor: React.RefObject
   const minutes = !all.words ? '0 min' : all.minutes < 1 ? '< 1 min' : `${Math.round(all.minutes)} min`;
   // The mouse going down here does not take the keyboard from the text, so what is selected there stays selected.
   return (
-    <div className="counts" ref={ref} onMouseDown={(e) => e.preventDefault()}>
+    <div className={`counts${clear ? ' is-clear' : ''}`} ref={ref} onMouseDown={(e) => e.preventDefault()}>
       {open && (
         <div className="counts-pop" role="dialog" aria-label="Word count">
           {picked && <><div className="counts-head">Selected</div>{rows(picked)}<div className="counts-head">Whole file</div></>}
@@ -414,6 +508,23 @@ function WordCount({ editor, rich, rendered, loaded }: { editor: React.RefObject
   );
 }
 
+/** A file's name cannot hold a slash. One that arrives anyway (pasted or dictated; the key itself does nothing)
+ *  is taken out of the title, and the caret keeps its place. */
+function dropSlashes(el: HTMLElement) {
+  const text = el.textContent ?? '';
+  if (!text.includes('/')) return;
+  const sel = window.getSelection();
+  let caret = text.length;
+  if (sel?.focusNode && el.contains(sel.focusNode)) {
+    const upTo = document.createRange();
+    upTo.selectNodeContents(el);
+    upTo.setEnd(sel.focusNode, sel.focusOffset);
+    caret = upTo.toString().length;
+  }
+  el.textContent = text.replace(/\//g, '');
+  if (el.firstChild && sel && document.activeElement === el) sel.collapse(el.firstChild, text.slice(0, caret).replace(/\//g, '').length);
+}
+
 /** What an editor shows while it holds no file: a box to name a new one. */
 function EmptyEditor() {
   const root = useStore((s) => projectRoot(s));
@@ -427,7 +538,7 @@ function EmptyEditor() {
   return (
     <div className="editor-empty">
       <div className="editor-empty-title">No file open</div>
-      <input value={name} placeholder="Name a new file" spellCheck={false} onChange={(e) => setName(e.target.value)}
+      <input value={name} placeholder="Name a new file" spellCheck={false} onChange={(e) => setName(e.target.value.replace(/\//g, ''))}
         onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); make(); } }} />
       <div className="editor-empty-hint">Enter makes it in <b>{basename(root)}</b> (a name with no ending becomes a note). ⌘O opens a file that is already there, ⌘N starts a dated note.</div>
     </div>
@@ -610,11 +721,15 @@ function NoteTitle({ path, toNote, note, alone }: { path: string; toNote: () => 
       const height = Math.round(Math.max(h.bottom, t.bottom) - top + 240);
       const css = getComputedStyle(head);
       const half = (n: number) => Math.round(n * 2) / 2;
+      // To the half pixel, so that the same layout always gives the same drawing.
+      const box = { left: half(t.left - s.left - 2), top: half(t.top - top + t.height * 0.14), right: half(t.right - s.left + 2), bottom: half(t.bottom - top - t.height * 0.1) };
+      // A title with no characters in it gets a mark where its first letter would stand, and the traces leave that.
+      const empty = !(title.textContent ?? '').trim();
       const scene = {
         width, height, seed: path,
-        // To the half pixel, so that the same layout always gives the same drawing.
-        title: { left: half(t.left - s.left - 2), top: half(t.top - top + t.height * 0.14), right: half(t.right - s.left + 2), bottom: half(t.bottom - top - t.height * 0.1) },
+        title: box,
         glyphs: titleGlyphs(title, t, s.left, top),
+        mark: empty ? { x: half((box.left + box.right) / 2), y: half((box.top + box.bottom) / 2), r: half(Math.max(9, Math.min(18, (box.bottom - box.top) * 0.42))) } : undefined,
         blocks: noteBoxes(scroller, s.left, top, h.left - s.left - 14, height),
         near: rgb(css.getPropertyValue('--accent')), mid: rgb(css.getPropertyValue('--neon')), far: rgb(css.getPropertyValue('--faint')),
         strength: 0.24,
@@ -637,9 +752,10 @@ function NoteTitle({ path, toNote, note, alone }: { path: string; toNote: () => 
       root.addEventListener('animationend', later);
     }
     document.fonts.addEventListener('loadingdone', later);
+    title.addEventListener('input', later); // the first letter typed into an empty title leaves its box the same size
     draw();
     return () => {
-      cancelAnimationFrame(frame); sizes.disconnect(); edits.disconnect(); document.fonts.removeEventListener('loadingdone', later);
+      cancelAnimationFrame(frame); sizes.disconnect(); edits.disconnect(); document.fonts.removeEventListener('loadingdone', later); title.removeEventListener('input', later);
       root?.removeEventListener('transitionend', later); root?.removeEventListener('animationend', later);
     };
   }, [drop, path, theme, wired]);
@@ -652,7 +768,7 @@ function NoteTitle({ path, toNote, note, alone }: { path: string; toNote: () => 
   const commit = async () => {
     const el = ref.current;
     if (!el || busy.current) return false;
-    const next = (el.textContent ?? '').replace(/\s+/g, ' ').trim();
+    const next = (el.textContent ?? '').replace(/\//g, '').replace(/\s+/g, ' ').trim();
     if (!next || next === stem) { el.textContent = stem; return false; }
     busy.current = true;
     const ok = await renameEntry(path, next + ext).finally(() => { busy.current = false; });
@@ -660,13 +776,15 @@ function NoteTitle({ path, toNote, note, alone }: { path: string; toNote: () => 
     return ok;
   };
   return (
-    <div ref={headRef} className={`rich-head${drop === null ? '' : ' is-beside'}`}>
+    <div ref={headRef} className={`rich-head${drop === null ? '' : ' is-beside'}${wired ? ' has-wires' : ''}`}>
       {wired && <canvas ref={wires} className="title-wires" aria-hidden="true" />}
       <div ref={ref} className="rich-title" contentEditable="plaintext-only" suppressContentEditableWarning spellCheck={false} role="textbox" aria-label="Note title"
         style={drop === null ? undefined : { top: drop }}
         onBlur={() => { void commit(); }}
+        onInput={(e) => dropSlashes(e.currentTarget)}
         onKeyDown={(e) => {
           if (e.nativeEvent.isComposing) return;
+          if (e.key === '/' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); return; } // a file's name cannot hold one
           if (e.key === 'Enter' || e.key === 'ArrowDown') { e.preventDefault(); void commit().then((renamed) => { if (!renamed) toNote(); }); }
           else if (e.key === 'Escape') { e.preventDefault(); e.currentTarget.textContent = stem; toNote(); }
         }} />

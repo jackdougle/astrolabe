@@ -109,7 +109,7 @@ export function spacedPaths(text: string): { at: number; raw: string }[] {
 const KEEP_MS = 15000;
 const lists = new Map<string, { at: number; index: Index; loading: Promise<Index> | null }>();
 
-/** The files under `root`. A list that has gone stale is still used while a new one is fetched. */
+/** The files under `root`. A list that has gone stale is still used when a new one is slow to come. */
 export async function projectIndex(root: string): Promise<Index | null> {
   // The home folder and the disk's top are not projects: listing them would take seconds and find little.
   if (!root || root === '/' || root === appInfo.home) return null;
@@ -121,6 +121,10 @@ export async function projectIndex(root: string): Promise<Index | null> {
     lists.set(root, { at: Date.now(), index, loading: null });
     return index;
   });
-  if (had) { if (!had.loading) had.loading = load().catch(() => { had.loading = null; return had.index; }); return had.index; }
+  if (had) {
+    if (!had.loading) had.loading = load().catch(() => { had.loading = null; return had.index; });
+    // The new list is waited for briefly, so a file written a moment ago is in it; a slow one does not hold the link up.
+    return Promise.race([had.loading, new Promise<Index>((done) => { setTimeout(() => done(had.index), 400); })]);
+  }
   try { return await load(); } catch { return null; }
 }

@@ -1192,6 +1192,7 @@ function registerIpc() {
     menu.popup({ window: win ?? undefined, callback: () => setTimeout(() => resolve(null), 50) });
   }));
   ipcMain.on('app:closeWindow', (e) => BrowserWindow.fromWebContents(e.sender)?.close());
+  ipcMain.on('win:buttons', (e, show: boolean) => { if (process.platform === 'darwin') BrowserWindow.fromWebContents(e.sender)?.setWindowButtonVisibility(!!show); });
   ipcMain.on('clipboard:write', (_e, text: string) => clipboard.writeText(text));
   ipcMain.handle('clipboard:read', () => clipboard.readText());
 }

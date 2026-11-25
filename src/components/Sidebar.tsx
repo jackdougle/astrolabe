@@ -95,7 +95,7 @@ interface Entry { name: string; path: string; dir: boolean }
 /** What a row folds away: a folder's rows, a file's search hits. They drop down as it opens and draw back up as it
  *  closes (`.tree-kids` in styles.css), staying in the page until they are out of sight. What is already open when
  *  its row first shows is simply there, however late its rows arrive (`ready`): a window opening does not unfold. */
-function Fold({ open, ready = true, children }: { open: boolean; ready?: boolean; children: () => React.ReactNode }) {
+function Fold({ open, ready = true, guide, children }: { open: boolean; ready?: boolean; guide?: number; children: () => React.ReactNode }) {
   const on = open && ready;
   const born = useRef(open);
   const [shown, setShown] = useState(on);
@@ -116,7 +116,10 @@ function Fold({ open, ready = true, children }: { open: boolean; ready?: boolean
   // In the page at no height first, and seen there, so that there is something to grow from.
   useLayoutEffect(() => { if (shown && on && !full) { ref.current?.getBoundingClientRect(); setFull(true); } }, [shown, on, full]);
   if (!shown) return null;
-  return <div ref={ref} className={`tree-kids${full ? ' is-open' : ''}`}><div>{children()}</div></div>;
+  // `guide`: where the folder's chevron is centred, for the thin line down the left of what it holds (.tree-guide).
+  return <div ref={ref} className={`tree-kids${full ? ' is-open' : ''}`}>
+    <div className={guide === undefined ? undefined : 'tree-guide'} style={guide === undefined ? undefined : { '--guide-x': `${guide}px` } as React.CSSProperties}>{children()}</div>
+  </div>;
 }
 
 function FileTree() {
@@ -362,7 +365,7 @@ function FileTree() {
             ? <RenameField initial={e.name} onDone={async (name) => { setRenaming(null); if (name && name !== e.name) await renameEntry(e.path, name); }} />
             : <span className={`tree-name${e.dir ? ' is-dir' : ''}`}>{e.name}</span>}
         </div>
-        {e.dir && <Fold open={!!open[e.path]} ready={!!children[e.path] || creating === e.path}>{() => renderDir(e.path, depth + 1)}</Fold>}
+        {e.dir && <Fold open={!!open[e.path]} ready={!!children[e.path] || creating === e.path} guide={10 + depth * 13 + 7}>{() => renderDir(e.path, depth + 1)}</Fold>}
       </div>
     ));
     return field ? [field, ...rows] : rows;
@@ -392,6 +395,14 @@ function RenameField({ initial, onDone }: { initial: string; onDone: (name: stri
   const finish = (name: string | null) => { if (done.current) return; done.current = true; onDone(name); };
   return (
     <input ref={ref} className="tree-rename" defaultValue={initial} spellCheck={false} onClick={(e) => e.stopPropagation()}
+      onInput={(e) => {
+        // A name cannot hold a slash: one typed or pasted is taken out again, and the caret keeps its place.
+        const el = e.currentTarget;
+        if (!el.value.includes('/')) return;
+        const caret = el.value.slice(0, el.selectionStart ?? el.value.length).replace(/\//g, '').length;
+        el.value = el.value.replace(/\//g, '');
+        el.setSelectionRange(caret, caret);
+      }}
       onBlur={(e) => finish(e.target.value.trim() || null)}
       onKeyDown={(e) => {
         e.stopPropagation();

@@ -11,7 +11,7 @@ export default async function ({ page, run, type, work, shot }) {
   fs.writeFileSync(`${dir}/reactor.md`, long);
   fs.writeFileSync(`${dir}/short.md`, 'Short.\n\n- one\n- two\n\n' + long);
   await run(`cd ${work}`);
-  const open = async (name) => { await page.keyboard.press('Meta+p'); await page.waitForTimeout(350); await type(name); await page.keyboard.press('Enter'); await page.waitForTimeout(1500); };
+  const open = async (name) => { await page.keyboard.press('Meta+o'); await page.waitForTimeout(350); await type(name); await page.keyboard.press('Enter'); await page.waitForTimeout(1500); };
   // What is drawn: how much of the canvas has ink, how strong it is by the word and far from it, and whether any falls on the title or the text.
   const look = () => page.evaluate(() => {
     const c = document.querySelector('.title-wires'); if (!c) return null;

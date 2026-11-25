@@ -5,8 +5,8 @@ import { attachEmoji, contextValue, ensureHistory, ghostFor, history, loneColon,
 import { bus, moving, paneHandles } from '../lib/panes';
 import { focusedId, TermPane, termWeight, useStore } from '../lib/store';
 import { takeParked, TermSession } from '../lib/termSession';
+import { FindBar } from './FindBar';
 import { Icon } from './Icons';
-import { tip } from './Tooltip';
 
 let inputSeq = 0;
 
@@ -17,6 +17,7 @@ export function TerminalPane({ pane, active }: { pane: TermPane; active: boolean
   const sessionRef = useRef<TermSession | null>(null);
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   const [finding, setFinding] = useState(false);
+  const findWords = useRef('');
   const settings = useStore((s) => s.settings);
   const closePane = useStore((s) => s.closePane);
 
@@ -151,7 +152,7 @@ export function TerminalPane({ pane, active }: { pane: TermPane; active: boolean
       const st = useStore.getState();
       if (focusedId(st) === pane.id && !st.palette) requestAnimationFrame(focus);
     });
-    const offFind = bus.on('term.find', (id) => { if (id === pane.id) setFinding(true); });
+    const offFind = bus.on('find.toggle', (id) => { if (id === pane.id) setFinding((on) => { if (on) requestAnimationFrame(focus); return !on; }); });
     const offSet = bus.on('input.set', (arg: { pane: string; text: string }) => { if (arg.pane === pane.id) { setText(arg.text); focusInput(); } });
     const offInsert = bus.on('input.insert', (arg: { pane: string; text: string }) => {
       if (arg.pane !== pane.id) return;
@@ -176,7 +177,7 @@ export function TerminalPane({ pane, active }: { pane: TermPane; active: boolean
   useEffect(() => {
     sessionRef.current?.applyAppearance();
     editorRef.current?.updateOptions({ fontSize: settings.fontSize, fontFamily: monoFont(), fontWeight: termWeight(settings), cursorSmoothCaretAnimation: settings.smoothCaret ? 'on' : 'off' });
-  }, [settings.theme, settings.fontSize, settings.fontWeight, settings.fontFamily, settings.smoothCaret, settings.scrollSpeed]);
+  }, [settings.theme, settings.fontSize, settings.fontWeight, settings.outputWeight, settings.fontFamily, settings.smoothCaret, settings.scrollSpeed]);
 
   return (
     <div className="term-pane">
@@ -189,30 +190,8 @@ export function TerminalPane({ pane, active }: { pane: TermPane; active: boolean
           </div>
           <div className="cmd-editor" ref={inputHostRef} />
         </div>
-        {finding && <FindBar session={sessionRef.current} onClose={() => { setFinding(false); sessionRef.current?.clearFind(); paneHandles.get(pane.id)?.focus(); }} />}
+        {finding && <FindBar make={(report) => sessionRef.current!.finder(report)} target="terminal" placeholder="Find in terminal" older memory={findWords} onClose={() => { setFinding(false); paneHandles.get(pane.id)?.focus(); }} />}
       </div>
-    </div>
-  );
-}
-
-function FindBar({ session, onClose }: { session: TermSession | null; onClose: () => void }) {
-  const [q, setQ] = useState('');
-  const [missing, setMissing] = useState(false);
-  const ref = useRef<HTMLInputElement>(null);
-  useEffect(() => { ref.current?.focus(); }, []);
-  const go = (dir: 1 | -1, query = q) => { if (!session || !query) { setMissing(false); return; } setMissing(!session.find(query, dir)); };
-  return (
-    <div className={`findbar${missing ? ' is-missing' : ''}`}>
-      <input ref={ref} value={q} placeholder="Find in terminal" spellCheck={false}
-        onChange={(e) => { setQ(e.target.value); go(1, e.target.value); }}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') { e.preventDefault(); go(e.shiftKey ? 1 : -1); }
-          else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); onClose(); }
-        }} />
-      {missing && <span className="find-none">No matches</span>}
-      <button {...tip('Previous match', '↩')} onClick={() => go(-1)}><Icon name="up" /></button>
-      <button {...tip('Next match', '⇧↩')} onClick={() => go(1)}><Icon name="down" /></button>
-      <button {...tip('Close', 'Esc')} onClick={onClose}><Icon name="x" /></button>
     </div>
   );
 }

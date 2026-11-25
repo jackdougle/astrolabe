@@ -1,16 +1,21 @@
-// A heading's #s in the rendered view. The heading the caret is in reads as its line does in the file,
-// "### Title", and the #s are text: the caret runs through them, they can be selected, and adding or
-// deleting one changes the heading's level, as it would in the raw view. Every other heading shows only
-// its words.
+// A heading's #s in the rendered view. The heading the caret is on shows them in front of its words, greyed back,
+// exactly as many as its level: the line reads as it does in the file, "### Title". Every other heading shows only
+// its words, and has no #s at all (none kept hidden beside the words). On the caret's line the #s are text: the
+// caret runs through them, they can be selected, and adding or deleting one changes the heading's level there and
+// then (a line that no longer starts "#s, a space" is an ordinary line, and one edited until it does is a heading
+// again). They grow in as the caret arrives and shrink away as it leaves (richMotion.ts).
 //
-// The #s carry a mark of their own (`hash`) that is never written to the file. One rule keeps the note in
-// order after every change: marked text may only be the "### " that opens the heading the caret is in.
-// Anywhere else it is taken out, which is also what closes a heading when the caret leaves it. Putting the
-// #s in and taking them out stays out of the undo history; an edit made to them is part of it.
+// The #s carry a mark of their own (`hash`) that is never written to the file, since the heading's level already
+// says it. One rule keeps the note in order after every change: the caret's heading opens with its own "### " and
+// no other text is marked. Putting the #s in and taking them out stays out of the undo history; an edit made to
+// them is part of it.
+//
+// A toggle heading's title (richNotion.ts) is a heading here too. It cannot become a paragraph, so where a
+// heading would, it goes back to being a plain toggle's title.
 import { InputRule } from '@milkdown/kit/prose/inputrules';
 import { Fragment, Slice } from '@milkdown/kit/prose/model';
 import type { MarkType, Node as PMNode } from '@milkdown/kit/prose/model';
-import { Plugin, TextSelection } from '@milkdown/kit/prose/state';
+import { Plugin } from '@milkdown/kit/prose/state';
 import type { EditorState, Transaction } from '@milkdown/kit/prose/state';
 import { $inputRule, $mark, $prose } from '@milkdown/kit/utils';
 import { motionKey } from './richMotion';
@@ -28,8 +33,16 @@ export const hashMark = $mark('hash', () => ({
 }));
 
 const hashOf = (state: EditorState) => state.schema.marks.hash as MarkType;
-const isHeading = (node: PMNode) => node.type.name === 'heading';
+const isTitle = (node: PMNode) => node.type.name === 'toggle_summary';
+const isHeading = (node: PMNode) => node.type.name === 'heading' || (isTitle(node) && node.attrs.level > 0);
+/** `tr` with the heading at `at` no longer one: an ordinary line, or for a toggle heading a plain toggle's title. */
+const unhead = (tr: Transaction, at: number, node: PMNode) => (isTitle(node) ? tr.setNodeMarkup(at, undefined, { ...node.attrs, level: 0 }) : tr.setNodeMarkup(at, node.type.schema.nodes.paragraph));
 const prefix = (level: number) => `${'#'.repeat(level)} `;
+/** Set on a step that makes a heading by typing: its #s are put on show until the caret leaves it. */
+const OPENING = 'astrolabe-hashes-open';
+export const showHashes = (tr: Transaction) => tr.setMeta(OPENING, true);
+/** Whether a heading (or a toggle heading's title) has its #s on show. */
+export const hashesShown = (node: PMNode) => { const mark = node.type.schema.marks.hash; return !!mark && !!node.firstChild && !!mark.isInSet(node.firstChild.marks); };
 /** How much of the start of `node` is marked text. */
 function lead(node: PMNode, mark: MarkType) {
   let n = 0;
@@ -51,6 +64,14 @@ function inOrder(node: PMNode, mark: MarkType) {
 
 /** `node` as it is without its #s showing. The bridge to the file compares blocks this way, so a heading is not taken for edited because the caret is in it. */
 export function unhashed(node: PMNode): PMNode {
+  if (!node.isTextblock) {
+    // The heading may be inside the block: a toggle heading's title, or a heading in a toggle or a quote.
+    if (node.isLeaf) return node;
+    let changed = false;
+    const kids: PMNode[] = [];
+    node.forEach((child) => { const bare = unhashed(child); if (bare !== child) changed = true; kids.push(bare); });
+    return changed ? node.copy(Fragment.fromArray(kids)) : node;
+  }
   if (!isHeading(node)) return node;
   const mark = node.type.schema.marks.hash as MarkType | undefined;
   if (!mark || !node.firstChild || !mark.isInSet(node.firstChild.marks)) return node;
@@ -61,41 +82,54 @@ export function unhashed(node: PMNode): PMNode {
 /** A heading's id comes from its words, not from the #s shown in front of them. */
 export const headingId = (node: PMNode) => unhashed(node).textContent.toLowerCase().trim().replace(/\s+/g, '-');
 
-/** "## " typed at the start of a line makes it a heading. (Milkdown's own rule also fires inside a heading, where the #s are now text to edit.) */
-export const headingRule = $inputRule(() => new InputRule(/^(#{1,6})\s$/, (state, match, start, end) => {
+/** "## " typed at the start of a line makes it a heading. Typed where a heading's words begin (straight after the
+ *  #s it shows), it sets that heading's level and is not kept: the same number leaves it as it is. The same goes
+ *  for a toggle heading's title. */
+export const headingRule = $inputRule(() => new InputRule(/^(?:(#{1,6}) )?(#{1,6})\s$/, (state, match, start, end) => {
   const heading = state.schema.nodes.heading;
   const $start = state.doc.resolve(start);
-  if ($start.parent.type === heading || !$start.node(-1).canReplaceWith($start.index(-1), $start.indexAfter(-1), heading)) return null;
-  return state.tr.delete(start, end).setBlockType(start, start, heading, { level: match[1].length });
+  const node = $start.parent;
+  const level = match[2].length;
+  if (isHeading(node)) {
+    const n = lead(node, hashOf(state));
+    // Only "#s, a space" typed right after the heading's own #s.
+    if (!match[1] || n !== match[1].length + 1) return null;
+    const tr = state.tr.delete(start + n, end);
+    return node.attrs.level === level ? tr : tr.setNodeMarkup($start.before(), undefined, { ...node.attrs, level });
+  }
+  if (match[1] || node.type.name !== 'paragraph') return null;
+  if (!$start.node(-1).canReplaceWith($start.index(-1), $start.indexAfter(-1), heading)) return null;
+  return showHashes(state.tr.delete(start, end).setBlockType(start, start, heading, { level }));
 }));
 
-/** The caret sits where a heading's words begin, just after its #s, or in among them. */
+/** The caret sits where a heading's words begin (just after its #s, when they are on show), or in among the #s. */
 function atHashes(state: EditorState) {
   const { $head, empty } = state.selection;
   if (!empty || !$head.depth || !isHeading($head.parent)) return null;
   const n = lead($head.parent, hashOf(state));
-  return n && $head.parentOffset <= n ? { n, pos: $head.before(), node: $head.parent, offset: $head.parentOffset } : null;
+  return $head.parentOffset <= n ? { n, pos: $head.before(), node: $head.parent, offset: $head.parentOffset } : null;
 }
 /** Backspace where a heading's words begin takes one # away, so the heading goes up a level; the last # leaves an ordinary line. (Among the #s it deletes the one before the caret, which comes to the same.) */
 export const hashBackspace: Cmd = (state, dispatch) => {
   const here = atHashes(state);
-  if (!here || here.offset !== here.n) return false;
+  if (!here || !here.n || here.offset !== here.n) return false; // (with no #s on show, Backspace does what it does anywhere)
   const level = here.node.attrs.level - 1;
-  if (dispatch) dispatch(level ? state.tr.setNodeMarkup(here.pos, undefined, { ...here.node.attrs, level }) : state.tr.setNodeMarkup(here.pos, state.schema.nodes.paragraph));
+  if (dispatch) dispatch(level ? state.tr.setNodeMarkup(here.pos, undefined, { ...here.node.attrs, level }) : unhead(state.tr, here.pos, here.node));
   return true;
 };
 /** Enter before a heading's words opens an empty line above it and leaves the heading whole. */
 export const hashEnter: Cmd = (state, dispatch) => {
   const here = atHashes(state);
-  if (!here) return false;
-  if (dispatch) dispatch(state.tr.insert(here.pos, state.schema.nodes.paragraph.create()).scrollIntoView());
+  if (!here || (!here.n && !here.node.content.size)) return false;
+  // (Above the whole toggle, for a toggle heading.)
+  const above = isTitle(here.node) ? state.selection.$head.before(-1) : here.pos;
+  if (dispatch) dispatch(state.tr.insert(above, state.schema.nodes.paragraph.create()).scrollIntoView());
   return true;
 };
 
 const HISTORY = 'history$'; // prosemirror-history's key: set on the transactions that undo and redo
 
 export const hashes = $prose(() => {
-  let stepped = 0; // when → was last pressed at the end of a line
   /** The #s of the heading the caret was already in were edited by hand: what they now say decides the level. */
   const edited = (trs: readonly Transaction[], old: EditorState, at: number, level: number) => {
     if (!trs.some((tr) => tr.docChanged) || trs.some((tr) => tr.getMeta(HISTORY) || tr.getMeta('addToHistory') === false)) return false;
@@ -119,51 +153,46 @@ export const hashes = $prose(() => {
   const settle = (trs: readonly Transaction[], old: EditorState | null, state: EditorState) => {
       const here = headingAt(state);
       const mark = hashOf(state);
-      // Marked text anywhere but in the caret's heading goes: #s left behind when the caret moved on, or brought in by a paste or an undo.
-      const stray: [number, number][] = [];
-      const closing: [number, string][] = [];
+      // The heading the caret is in opens with its own "### " and no other text is marked anywhere: #s left
+      // behind when the caret moved on, or brought in by a paste or an undo, go (they are not kept hidden).
+      const fix: [number, PMNode][] = [];
       state.doc.descendants((node, pos) => {
         if (!node.isTextblock) return true;
-        if (pos === here) return false;
-        const found = marked(node, pos + 1, mark);
-        if (found.length && isHeading(node) && found[0][0] === pos + 1) closing.push([pos + 1, node.textBetween(0, found[0][1] - pos - 1)]);
-        stray.push(...found);
+        if (pos === here && isHeading(node) ? !inOrder(node, mark) : marked(node, 0, mark).length) fix.push([pos, node]);
         return false;
       });
       const tr = state.tr;
-      for (const [from, to] of stray.reverse()) tr.delete(from, to);
-      const motion: MotionMeta = {};
-      if (closing.length) motion.shrink = closing.map(([pos, text]) => [tr.mapping.map(pos, -1), text]);
+      const grow: number[] = [];
+      const shrink: [number, string][] = [];
       let ours = false; // part of the edit that caused it, so undone with it
-      if (here >= 0) {
-        const at = tr.mapping.map(here);
-        const node = tr.doc.nodeAt(at)!;
+      for (const [at, node] of fix.reverse()) { // from the end, so the places of those before stay good
         const start = at + 1;
-        if (!inOrder(node, mark)) {
-          if (old && edited(trs, old, here, node.attrs.level)) {
-            const m = /^(#{1,6}) /.exec(plain(node));
-            ours = true;
-            if (m) {
-              tr.removeMark(start + m[0].length, start + node.content.size, mark).addMark(start, start + m[0].length, mark.create());
-              if (m[1].length !== node.attrs.level) tr.setNodeMarkup(at, undefined, { ...node.attrs, level: m[1].length });
-            } else {
-              // No longer "#s, then a space": in the file this line is not a heading, so it is not one here either.
-              tr.removeMark(start, start + node.content.size, mark).setNodeMarkup(at, state.schema.nodes.paragraph);
-            }
-          } else {
-            const had = marked(node, start, mark);
-            for (const [from, to] of had.reverse()) tr.delete(from, to);
-            const text = prefix(node.attrs.level);
-            tr.insert(start, state.schema.text(text, [mark.create()]));
-            if (!had.length) {
-              motion.grow = [[start, start + text.length]];
-              // Stepping in with → from the line above arrives in front of the #s, as it does in the file.
-              const { selection } = state;
-              if (selection.empty && selection.$head.parentOffset === 0 && performance.now() - stepped < 400) tr.setSelection(TextSelection.create(tr.doc, start));
-            }
-          }
+        if (at !== here) {
+          const found = marked(node, start, mark);
+          if (isHeading(node) && found.length && found[0][0] === start) shrink.push([start, node.textBetween(0, found[0][1] - start)]);
+          for (const [from, to] of found.reverse()) tr.delete(from, to);
+          continue;
         }
+        if (old && edited(trs, old, here, node.attrs.level)) {
+          const m = /^(#{1,6}) /.exec(plain(node));
+          ours = true;
+          if (m) {
+            tr.removeMark(start + m[0].length, start + node.content.size, mark).addMark(start, start + m[0].length, mark.create());
+            if (m[1].length !== node.attrs.level) tr.setNodeMarkup(at, undefined, { ...node.attrs, level: m[1].length });
+          } else {
+            // No longer "#s, then a space": in the file this line is not a heading, so it is not one here either.
+            unhead(tr.removeMark(start, start + node.content.size, mark), at, node);
+          }
+          continue;
+        }
+        const had = marked(node, start, mark);
+        for (const [from, to] of had.reverse()) tr.delete(from, to);
+        tr.insert(start, state.schema.text(prefix(node.attrs.level), [mark.create()]));
+        if (!had.length) grow.push(start);
       }
+      const motion: MotionMeta = {};
+      if (shrink.length) motion.shrink = shrink.map(([pos, text]) => [tr.mapping.map(pos, -1), text]);
+      if (grow.length) motion.grow = grow.map((pos) => { const from = tr.mapping.map(pos, -1); const node = tr.doc.resolve(from).parent; return [from, from + prefix(node.attrs.level).length]; });
       // The other way round: a line edited until it reads "#s, a space, words" (a seventh # deleted, say) is a heading again.
       const { $head } = state.selection;
       if (here < 0 && old && $head.depth && $head.parent.type.name === 'paragraph' && typedInto(trs, old, $head.before())) {
@@ -192,11 +221,6 @@ export const hashes = $prose(() => {
       },
     }),
     props: {
-      handleKeyDown(view, event) {
-        const { $head, empty } = view.state.selection;
-        stepped = event.key === 'ArrowRight' && !event.shiftKey && !event.metaKey && !event.altKey && !event.ctrlKey && empty && $head.parentOffset === $head.parent.content.size ? performance.now() : 0;
-        return false;
-      },
       // Copied text leaves here as Markdown and as HTML, and neither should carry the #s twice.
       transformCopied(slice) {
         const mark = slice.content.firstChild?.type.schema.marks.hash as MarkType | undefined;

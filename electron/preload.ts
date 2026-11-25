@@ -131,6 +131,8 @@ const api = {
      *  id of the row chosen. */
     menu: (items: ({ id: string; label: string; enabled?: boolean } | null)[]) => ipcRenderer.invoke('app:menu', items) as Promise<string | null>,
     closeWindow: () => ipcRenderer.send('app:closeWindow'),
+    /** Shows or hides the window's own close, minimise and zoom buttons (they go with the top bar). */
+    windowButtons: (show: boolean) => ipcRenderer.send('win:buttons', show),
     onMenuCommand: (fn: (cmd: string) => void) => on('menu:command', fn),
     onFullscreen: (fn: (on: boolean) => void) => on('win:fullscreen', fn),
     onFocus: (fn: (on: boolean) => void) => on('win:focus', fn),

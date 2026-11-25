@@ -1,11 +1,12 @@
 // A plain click on a link in a rendered note shows a box under it with the address. Clicking the address
-// goes there; the pencil turns it into a field, and Enter writes the new address into the note.
+// goes there; the pencil turns it into a field, and Enter writes the new address into the note; the bin takes the
+// link off and leaves its words.
 import fs from 'node:fs';
 import path from 'node:path';
 export default async function ({ page, shot, work }) {
   const ok = (name, pass, detail = '') => console.log(`${pass ? 'ok  ' : 'FAIL'} ${name}${detail ? `: ${detail}` : ''}`);
   const note = path.join(work, 'notes', 'links.md');
-  fs.writeFileSync(note, '# Links\n\nOpen [the script](../main.py) or read [the site](https://example.com/a) today.\n');
+  fs.writeFileSync(note, '# Links\n\nOpen [the script](../main.py) or read [the site](https://example.com/a) today, or [the third](https://example.net/c).\n');
   await page.evaluate((f) => window.__store.getState().openFile(f), note);
   await page.waitForSelector('.ProseMirror a[href="../main.py"]');
   await page.waitForTimeout(400);
@@ -61,6 +62,16 @@ export default async function ({ page, shot, work }) {
   await page.keyboard.press('Enter');
   await page.waitForTimeout(400);
   ok('an empty address removes the link, not its words', /read the site today/.test(await text() ?? ''), JSON.stringify(await text()));
+
+  // The bin takes the link off and keeps its words.
+  await page.click('.ProseMirror a[href="https://example.net/c"]');
+  await page.waitForTimeout(200);
+  ok('the box has a bin', await page.evaluate(() => !!document.querySelector('.link-box .link-remove')));
+  await shot('linkbox-3-bin');
+  await page.click('.link-box .link-remove');
+  await page.waitForTimeout(400);
+  ok('the bin removes the link, not its words', /or the third\./.test(await text() ?? ''), JSON.stringify(await text()));
+  ok('and the box is gone, the note has the keyboard', (await box()) === null && await page.evaluate(() => !!document.activeElement?.closest('.ProseMirror')));
 
   // Clicking the address goes there: a file opens in the editor.
   await page.click('.ProseMirror a[href="../main.py"]');

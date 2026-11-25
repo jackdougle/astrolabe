@@ -20,19 +20,26 @@ import { canJoin } from '@milkdown/kit/prose/transform';
 import { $prose, getMarkdown, insert } from '@milkdown/kit/utils';
 import '@milkdown/kit/prose/view/style/prosemirror.css';
 import type * as monacoNs from 'monaco-editor';
-import { appInfo, dirname } from './api';
+import { api, appInfo, dirname } from './api';
 import { openLink } from './links';
 import { collapseLinks } from './richCollapse';
-import { closeLinkBox, showLinkBox } from './richLink';
+import { closeLinkBox, promptLink, setLink, showLinkBox } from './richLink';
 import { emojiFor } from './monaco';
 import { caret, copyLines, deleteLines, lineBelow, moveLines, pairs, selectLines } from './richEditing';
 import type { Cmd } from './richEditing';
 import { joinNotes, notion, notionRules, taskEnter, toggleBackspace, toggleClick, toggleEnter, toggleMarks, toggleOpen } from './richNotion';
 import { hashBackspace, hashEnter, hashes, hashMark, headingId, headingRule, unhashed } from './richHashes';
 import { imageDrops, imageView } from './richImages';
+import { dropBlank, indentNotes, outdentNotes } from './richIndent';
 import { drawnSelection } from './richSelection';
+import { findMarks, richFinder } from './richFind';
+import type { Finder, Found } from './find';
 import { motion, shift } from './richMotion';
 import { symbolRules } from './richSymbols';
+import { underline, underlineHandler } from './richUnderline';
+import { bus } from './panes';
+import { keep as keepChange, spans as changeSpans, subscribe as onChanges, undo as undoChange } from './review';
+import type { Span } from './review';
 
 const FRONTMATTER = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/;
 function split(text: string) {
@@ -55,8 +62,8 @@ const slashFile: Cmd = (state, dispatch) => {
   richHooks.attach?.();
   return true;
 };
-/** How long a box takes to fill in or empty out; the same as `task-fill` in styles.css. */
-const TICK_MS = 140;
+/** How long a ticked or unticked task is in motion: its words easing to struck-through grey or back (`strike-in` in styles.css; the box itself is quicker). */
+const TICK_MS = 260;
 const tickKey = new PluginKey<DecorationSet>('astrolabe-tick');
 /** Ticks or unticks the task at `pos`, and marks it so its box fills in or empties out. */
 function flipTask(state: EditorState, pos: number, node: PMNode): Transaction {
@@ -145,10 +152,26 @@ const extras = $prose(() => keymap({
   'Alt-ArrowUp': moveLines(-1), 'Alt-ArrowDown': moveLines(1), 'Shift-Alt-ArrowUp': copyLines(-1), 'Shift-Alt-ArrowDown': copyLines(1),
   'Shift-Mod-k': deleteLines, 'Ctrl-l': selectLines,
   // Strike through. Tildes are left alone as typed, so a path or an "about" (~/notes, ~5) is never taken for one.
+  // ⌘U underlines the selected words (in the file, <u>words</u>). With nothing selected ⌘U hides the terminal (commands.ts).
+  'Mod-u': (state, dispatch) => { const u = state.schema.marks.underline; return !!u && !state.selection.empty && toggleMark(u)(state, dispatch); },
   'Shift-Mod-x': (state, dispatch) => { const strike = state.schema.marks.strike_through; return !!strike && toggleMark(strike)(state, dispatch); }, // ⌘L copies the file's path (commands.ts)
   Enter: (state, dispatch) => slashFile(state, dispatch) || hashEnter(state, dispatch) || toggleEnter(state, dispatch) || taskEnter(state, dispatch),
   'Mod-Enter': (state, dispatch) => toggleOpen(state, dispatch) || toggleTask(state, dispatch) || lineBelow(state, dispatch),
-  Backspace: (state, dispatch) => hashBackspace(state, dispatch) || toggleBackspace(state, dispatch),
+  Backspace: (state, dispatch) => hashBackspace(state, dispatch) || toggleBackspace(state, dispatch) || dropBlank(state, dispatch),
+  // Only the notes the caret is on or the selection touches move; what is nested under them stays where it is (richIndent.ts).
+  Tab: indentNotes, 'Shift-Tab': outdentNotes,
+  // ⌘K over selected words asks for an address to link them to; ⇧⌘V links them to the address on the clipboard.
+  'Mod-k': (state, _dispatch, view) => !state.selection.empty && !!view && promptLink(view),
+  'Shift-Mod-v': (state, _dispatch, view) => {
+    if (state.selection.empty || !view || !state.schema.marks.link) return false;
+    const { from, to } = state.selection;
+    void api.clipboard.read().then((text) => {
+      const href = text.trim();
+      if (view.isDestroyed || !/^(?:[a-z][a-z0-9+.-]*:\/\/|mailto:)\S+$|^www\.\S+\.\S+$/i.test(href)) return;
+      setLink(view, from, to, href.startsWith('www.') ? `https://${href}` : href);
+    });
+    return true;
+  },
 }));
 // [words](address) typed out becomes the words, linked, as its closing bracket goes in (the raw view keeps the
 // notation, which is what the file holds). A picture's ![alt](address) is not a link, and neither is anything in code.
@@ -304,12 +327,21 @@ function tickAt(view: EditorView, event: MouseEvent) {
 
 const clicks = $prose(() => new Plugin({
   props: {
+    handleDOMEvents: {
+      // A toggle's arrow is pressed like a button: it opens or shuts the toggle as the mouse goes down, and
+      // the press goes no further, so the caret stays where it was instead of jumping to the front of the title.
+      mousedown(view: EditorView, event: MouseEvent) {
+        if (event.button !== 0 || !toggleClick(view, event)) return false;
+        event.preventDefault();
+        return true;
+      },
+    },
     // Quick repeated clicks on a box arrive as double and triple clicks.
-    handleDoubleClick: (view: EditorView, _pos: number, event: MouseEvent) => tickAt(view, event) || toggleClick(view, event),
-    handleTripleClick: (view: EditorView, _pos: number, event: MouseEvent) => tickAt(view, event) || toggleClick(view, event),
+    handleDoubleClick: (view: EditorView, _pos: number, event: MouseEvent) => tickAt(view, event),
+    handleTripleClick: (view: EditorView, _pos: number, event: MouseEvent) => tickAt(view, event),
     handleClick(view: EditorView, _pos: number, event: MouseEvent) {
       const target = event.target as HTMLElement;
-      if (tickAt(view, event) || toggleClick(view, event)) return true;
+      if (tickAt(view, event)) return true;
       const a = target.closest('a') as HTMLAnchorElement | null;
       if (a && event.metaKey) {
         // Web links open in the browser; links to files open in the editor, relative to this note.
@@ -341,13 +373,14 @@ const linkPaste = $prose(() => new Plugin({
   },
 }));
 
-export interface RichHandle { focus(): void; focusEnd(): void; destroy(): void; insertMarkdown(md: string, at?: { x: number; y: number }): void; readOnly: boolean }
+export interface RichHandle { focus(): void; focusEnd(): void; destroy(): void; insertMarkdown(md: string, at?: { x: number; y: number }): void; finder(report: (f: Found) => void): Finder; readOnly: boolean }
 
 /** The language tag of a block shown as its Markdown source, for text the rendered view has no way to show. */
 const SOURCE = 'astrolabe:source';
 const SOURCE_BLOCK = /^(`{3,})astrolabe:source[ \t]*\n(?:([\s\S]*?)\n)?\1[ \t]*$/gm;
 /** One stretch of the file and the blocks it shows as: the bridge between the raw text and the rendered note. */
 interface Seg { src: string; nodes: PMNode[] }
+const isBlank = (node: PMNode) => node.type.name === 'paragraph' && node.content.size === 0;
 const endsBlank = (text: string) => /\n[ \t]*\r?\n[ \t]*$/.test(text);
 /** With a blank line after it, so the next block cannot run into it. */
 const spaced = (text: string) => (!text || endsBlank(text) ? text : `${text.replace(/[ \t]*(\r?\n)?$/, '')}\n\n`);
@@ -360,6 +393,13 @@ export async function mountRich(root: HTMLElement, model: monacoNs.editor.ITextM
   const readOnly = false;    // every note can be edited here: what cannot be shown rendered is shown as source
   let destroyed = false;
   let save = () => {};
+  // Changes made to the file from outside that are waiting to be looked at (review.ts), drawn on the note.
+  const reviewKey = new PluginKey<DecorationSet>('astrolabe-review');
+  const reviewMarks = $prose(() => new Plugin<DecorationSet>({
+    key: reviewKey,
+    state: { init: () => DecorationSet.empty, apply: (tr, set) => (tr.getMeta(reviewKey) as DecorationSet | undefined) ?? set.map(tr.mapping, tr.doc) },
+    props: { decorations: (state) => reviewKey.getState(state) },
+  }));
 
   const editor = await Editor.make()
     .config((ctx) => {
@@ -368,8 +408,18 @@ export async function mountRich(root: HTMLElement, model: monacoNs.editor.ITextM
       // Write Markdown the common way: dash bullets, dash rules, one space after the marker.
       ctx.update(remarkStringifyOptionsCtx, (prev) => ({
         ...prev, bullet: '-' as const, rule: '-' as const, listItemIndent: 'one' as const,
+        // A list is written tight: no blank line between its items, or between an item's words and the list nested
+        // under them. (Items made here would otherwise each come out followed by a blank line the note never showed.)
+        // Inside an item anything else is set off by a blank line, which Markdown needs there to read it back.
+        join: [...(prev.join ?? []), (left, right, parent) => {
+          if (parent.type === 'list') return 0;
+          if (parent.type === 'listItem') return left.type === 'paragraph' && right.type === 'list' ? 0 : 1;
+          return undefined;
+        }],
         handlers: {
           ...prev.handlers,
+          // <u>words</u>: Markdown has no underline of its own (richUnderline.ts).
+          underline: underlineHandler,
           // A lone tilde means nothing in the file (see singleTilde below), so it is written as typed, not as \~.
           // Two together would strike words through, so those keep their backslashes.
           text: (node, parent, state, info) => String(prev.handlers!.text!(node, parent, state, info)).replace(/(?<![\\~])\\~(?!~|\\~)/g, '~'),
@@ -387,8 +437,8 @@ export async function mountRich(root: HTMLElement, model: monacoNs.editor.ITextM
       });
     })
     // > makes a toggle here, so the preset's own rule for it (a quote) is left out; so is its heading rule, for the one in richHashes.ts.
-    .use(commonmark.filter((plugin) => plugin !== wrapInBlockquoteInputRule && plugin !== wrapInHeadingInputRule)).use(gfm.filter((plugin) => plugin !== strikethroughInputRule && plugin !== wrapInTaskListInputRule)).use(notion).use(collapseLinks).use(hashMark).use(headingRule)
-    .use(history).use(linkPaste).use(clipboard).use(listener).use(extras).use(pairs).use(notionRules).use(emojiRule).use(symbolRules).use(linkRule).use(clicks).use(tickMotion).use(cutLine).use(joinNotes).use(hashes).use(imageView).use(imageDrops).use(motion).use(shift).use(drawnSelection).use(caret)
+    .use(commonmark.filter((plugin) => plugin !== wrapInBlockquoteInputRule && plugin !== wrapInHeadingInputRule)).use(gfm.filter((plugin) => plugin !== strikethroughInputRule && plugin !== wrapInTaskListInputRule)).use(notion).use(underline).use(collapseLinks).use(hashMark).use(headingRule)
+    .use(history).use(linkPaste).use(clipboard).use(listener).use(extras).use(pairs).use(notionRules).use(emojiRule).use(symbolRules).use(linkRule).use(clicks).use(tickMotion).use(cutLine).use(joinNotes).use(hashes).use(imageView).use(imageDrops).use(motion).use(shift).use(drawnSelection).use(caret).use(reviewMarks).use(findMarks)
     .create();
 
   // The file and the note are kept in step block by block. Each top-level block of the note is tied to the
@@ -404,7 +454,27 @@ export async function mountRich(root: HTMLElement, model: monacoNs.editor.ITextM
   let shown = false;
   const read = new Map<string, PMNode[]>();    // stretches already read, so a reload only reads what changed
   const known = new WeakMap<PMNode, string>(); // blocks whose text in the file is known word for word
-  const write = (nodes: PMNode[]) => unescapeWiki(serialize(schema.topNodeType.create(null, nodes)).replace(SOURCE_BLOCK, (_m, _f, text) => text ?? ''));
+  const writeRun = (nodes: PMNode[]) => unescapeWiki(serialize(schema.topNodeType.create(null, nodes)).replace(SOURCE_BLOCK, (_m, _f, text) => text ?? ''))
+    // An empty line inside something else is just left out. (An empty list item keeps its "<br />": a marker with
+    // nothing after it can read back as an underline turning the line above into a heading.)
+    .replace(/^[ \t]*<br \/>[ \t]*\r?\n/gm, '');
+  /** The note's blocks as the file's text. An empty line in the note is an empty line in the file: the blank line
+   *  that sets two blocks apart, and one more for each empty line between them (the same is read back in `blocksOf`). */
+  const write = (nodes: PMNode[]) => {
+    let out = '';
+    let any = false;
+    let blank = 0;
+    let run: PMNode[] = [];
+    const flush = () => {
+      if (!run.length) return;
+      out += (any ? '\n\n' : '') + '\n'.repeat(blank) + writeRun(run).replace(/\s+$/, '');
+      any = true; blank = 0; run = [];
+    };
+    for (const node of nodes) { if (isBlank(node)) { flush(); blank += 1; } else run.push(node); }
+    flush();
+    if (!any) return '\n'.repeat(blank);
+    return `${out}\n${blank ? '\n'.repeat(blank + 1) : ''}`;
+  };
 
   /** The file's text cut into its top-level blocks, each with the blank lines after it. */
   const cut = (text: string) => {
@@ -438,6 +508,14 @@ export async function mountRich(root: HTMLElement, model: monacoNs.editor.ITextM
         if (!nodes.length || fingerprint(write(nodes)) !== fingerprint(src)) nodes = [];
       } catch { nodes = []; }
       if (!nodes.length) nodes = [schema.nodes.code_block.create({ language: SOURCE }, schema.text(src.replace(/^(?:[ \t]*\r?\n)+/, '').replace(/\s+$/, '')))];
+      // Blank lines past the one that sets blocks apart are empty lines in the note (see `write`).
+      const lines = src.split(/\r?\n/);
+      let lead = 0;
+      while (lead < lines.length && !lines[lead].trim()) lead += 1;
+      let tail = 0;
+      while (tail < lines.length - lead && !lines[lines.length - 1 - tail].trim()) tail += 1;
+      const empty = (n: number) => Array.from({ length: Math.max(0, n) }, () => schema.nodes.paragraph.create());
+      nodes = [...empty(lead), ...nodes, ...empty(tail - 2)];
       if (nodes.length === 1) known.set(nodes[0], src);
     }
     read.set(src, nodes);
@@ -459,10 +537,12 @@ export async function mountRich(root: HTMLElement, model: monacoNs.editor.ITextM
     if (!next.length) next = [schema.nodes.paragraph.create()];
     const now = topNodes();
     let a = 0;
-    while (a < now.length && a < next.length && still(now[a], next[a])) a += 1;
+    // A block that reads the same is left as it is, whether or not it is the very block that was read from the file:
+    // one typed here a moment ago is not, and replacing it would take the caret out of it.
+    while (a < now.length && a < next.length && (still(now[a], next[a]) || same(now[a], next[a]))) a += 1;
     let b = 0;
-    while (b < now.length - a && b < next.length - a && still(now[now.length - 1 - b], next[next.length - 1 - b])) b += 1;
-    if (a === now.length && a === next.length) { adopt(); return; }
+    while (b < now.length - a && b < next.length - a && (still(now[now.length - 1 - b], next[next.length - 1 - b]) || same(now[now.length - 1 - b], next[next.length - 1 - b]))) b += 1;
+    if (a === now.length && a === next.length) { adopt(); paint(); return; }
     let from = 0;
     for (let i = 0; i < a; i++) from += now[i].nodeSize;
     let to = view.state.doc.content.size;
@@ -478,6 +558,7 @@ export async function mountRich(root: HTMLElement, model: monacoNs.editor.ITextM
       view.dispatch(tr);
     } finally { applying = false; }
     adopt();
+    paint();
   };
   /** The editor's plugins may restamp a block as it goes in (a heading gets its id). The bridge holds the blocks as they now are. */
   const adopt = () => {
@@ -520,16 +601,22 @@ export async function mountRich(root: HTMLElement, model: monacoNs.editor.ITextM
     const after = segs.slice(s).map((seg) => seg.src).join('');
     const filled = pieces.filter((piece) => piece.src);
     filled.forEach((piece, i) => {
+      // Empty lines alone are only the extra blank lines they stand for.
+      if (piece.nodes.length && piece.nodes.every(isBlank)) { piece.src = '\n'.repeat(piece.nodes.length); return; }
       if (i < filled.length - 1 || after.trim()) piece.src = spaced(piece.src);
       else piece.src = piece.src.replace(/\s*$/, '\n'); // the file ends with one line break
     });
+    let lead = '';
     if (before.trim() && !endsBlank(before) && (filled.length || after.trim())) {
-      const gap = /\n[ \t]*$/.test(before) ? '\n' : '\n\n';
-      if (filled.length) filled[0].src = gap + filled[0].src; else pieces.unshift({ src: gap, nodes: [] });
+      // The blank line is the block before's to end with, not the next one's to start with: a stretch that starts
+      // with blank lines would carry them along wherever it is written again, and an empty line put next to it
+      // would come out one blank line too many.
+      lead = /\n[ \t]*$/.test(before) ? '\n' : '\n\n';
     }
     const eol = model.getEOL();
+    if (eol !== '\n') lead = lead.replace(/\n/g, eol);
     if (eol !== '\n') for (const piece of pieces) piece.src = piece.src.replace(/\r?\n/g, eol);
-    let middle = pieces.map((piece) => piece.src).join('');
+    let middle = lead + pieces.map((piece) => piece.src).join('');
     let next = front + before + middle + after;
     // Differences only in trailing blank lines (an empty paragraph to type into) don't count as edits.
     if (next.trimEnd() === value.trimEnd()) return;
@@ -548,13 +635,137 @@ export async function mountRich(root: HTMLElement, model: monacoNs.editor.ITextM
       segs = [{ src: middle, nodes: now }];
     } else {
       for (const piece of pieces) if (piece.nodes.length === 1 && piece.src) known.set(piece.nodes[0], piece.src);
-      segs = [...segs.slice(0, p), ...pieces, ...segs.slice(s)];
+      const kept = segs.slice(0, p);
+      if (lead) kept[p - 1] = { ...kept[p - 1], src: kept[p - 1].src + lead };
+      segs = [...kept, ...pieces, ...segs.slice(s)];
     }
     lastWritten = next;
-    const start = model.getPositionAt(from);
-    const end = model.getPositionAt(to);
-    model.pushEditOperations([], [{ range: { startLineNumber: start.lineNumber, startColumn: start.column, endLineNumber: end.lineNumber, endColumn: end.column }, text: middle }], () => null);
+    // Only the characters that differ are replaced, so marks on the text around them (changes waiting to be looked
+    // at) stay where they are while you type beside them.
+    const was = value.slice(from, to);
+    const max = Math.min(was.length, middle.length);
+    let a = 0;
+    while (a < max && was.charCodeAt(a) === middle.charCodeAt(a)) a += 1;
+    let b = 0;
+    while (b < max - a && was.charCodeAt(was.length - 1 - b) === middle.charCodeAt(middle.length - 1 - b)) b += 1;
+    // Never between the two halves of a line ending or of a character.
+    const halves = (text: string, i: number) => i > 0 && i < text.length && ((text.charCodeAt(i - 1) === 13 && text.charCodeAt(i) === 10) || (text.charCodeAt(i - 1) >= 0xd800 && text.charCodeAt(i - 1) <= 0xdbff));
+    while (a > 0 && (halves(was, a) || halves(middle, a))) a -= 1;
+    while (b > 0 && (halves(was, was.length - b) || halves(middle, middle.length - b))) b -= 1;
+    const start = model.getPositionAt(from + a);
+    const end = model.getPositionAt(to - b);
+    model.pushEditOperations([], [{ range: { startLineNumber: start.lineNumber, startColumn: start.column, endLineNumber: end.lineNumber, endColumn: end.column }, text: middle.slice(a, middle.length - b) }], () => null);
+    // Should the part written not leave the file as intended, the whole text is put right.
+    if (model.getValue() !== next) {
+      console.warn('bridge: partial write missed, whole text written');
+      model.pushEditOperations([], [{ range: model.getFullModelRange(), text: next }], () => null);
+    }
   };
+
+  // ---------- changes from outside, drawn on the note ----------
+  const newlines = (text: string) => { let n = 0; for (let i = text.indexOf('\n'); i >= 0; i = text.indexOf('\n', i + 1)) n += 1; return n; };
+  const isList = (node: PMNode) => node.type.name === 'bullet_list' || node.type.name === 'ordered_list';
+  type MdNode = { type: string; children?: MdNode[]; position?: { start: { line: number }; end: { line: number } } };
+  /** The items of a list that lines `s.start`..`s.end` fall in, as far down its nested lists as they can be told apart. */
+  const itemsIn = (md: MdNode, list: PMNode, inner: number, line0: number, s: Span, out: { from: number; to: number }[]): boolean => {
+    const kids = md.children ?? [];
+    if (kids.length !== list.childCount || kids.some((k) => k.type !== 'listItem' || !k.position)) return false;
+    list.forEach((item, offset, i) => {
+      const l0 = line0 + kids[i].position!.start.line - 1;
+      const l1 = line0 + kids[i].position!.end.line - 1;
+      if (l0 > s.end || s.start > l1) return;
+      const from = inner + offset;
+      const subMd = (kids[i].children ?? []).filter((k) => k.type === 'list' && k.position);
+      const subPm: { node: PMNode; at: number }[] = [];
+      item.forEach((child, at) => { if (isList(child)) subPm.push({ node: child, at: from + 1 + at }); });
+      // Only lines of its nested lists: the items there, not the whole item.
+      if (subMd.length && subMd.length === subPm.length && s.start >= line0 + subMd[0].position!.start.line - 1) {
+        const before = out.length;
+        if (subMd.every((sub, k) => itemsIn(sub, subPm[k].node, subPm[k].at + 1, line0, s, out)) && out.length > before) return;
+        out.length = before;
+      }
+      out.push({ from, to: from + item.nodeSize });
+    });
+    return true;
+  };
+  const button = (label: string, cls: string, run: () => void) => {
+    const el = document.createElement('button');
+    el.className = cls; el.textContent = label; el.type = 'button';
+    el.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); });
+    el.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); run(); });
+    return el;
+  };
+  const box = (s: Span) => () => {
+    const el = document.createElement('div');
+    el.className = `rv-box${s.offer ? ' is-offer' : ''}${(s.offer ?? s.old).length ? '' : ' is-bare'}`;
+    el.contentEditable = 'false';
+    el.dataset.change = s.id;
+    const acts = document.createElement('div');
+    acts.className = 'rv-actions';
+    if (s.offer) acts.append(button('Use this', 'rv-undo', () => undoChange(model, s.id)), button('Keep mine', 'rv-keep', () => keepChange(model, s.id)));
+    else acts.append(button('Keep', 'rv-keep', () => keepChange(model, s.id)), button('Undo', 'rv-undo', () => undoChange(model, s.id)));
+    el.append(acts);
+    const lines = s.offer ?? s.old;
+    if (lines.length) {
+      const text = document.createElement('div');
+      text.className = s.offer ? 'rv-new' : 'rv-old';
+      text.textContent = lines.join('\n');
+      el.append(text);
+    }
+    return el;
+  };
+  let painted = '';
+  const paint = () => {
+    if (destroyed) return;
+    const list = changeSpans(model);
+    if (!list.length) {
+      if (painted) { painted = ''; view.dispatch(view.state.tr.setMeta(reviewKey, DecorationSet.empty).setMeta('addToHistory', false)); }
+      return;
+    }
+    // The note has to be in step with the file for lines to be found in it; if typing is still on its way, this runs again when it lands.
+    const now = topNodes();
+    if (now.length !== segs.reduce((n, seg) => n + seg.nodes.length, 0) || model.getValue() !== front + segs.map((seg) => seg.src).join('')) return;
+    const blocks: { from: number; to: number; l0: number; l1: number; node: PMNode; seg: Seg }[] = [];
+    let line = 1 + newlines(front);
+    let pos = 0;
+    for (const seg of segs) {
+      const l1 = line + newlines(seg.src.replace(/\s+$/, ''));
+      for (const node of seg.nodes) { blocks.push({ from: pos, to: pos + node.nodeSize, l0: line, l1, node, seg }); pos += node.nodeSize; }
+      line += newlines(seg.src);
+    }
+    const decos: Decoration[] = [];
+    let sig = '';
+    for (const s of list) {
+      const marked: { from: number; to: number }[] = [];
+      if (s.end >= s.start) {
+        for (const b of blocks) {
+          if (b.l0 > s.end || s.start > b.l1) continue;
+          let items: { from: number; to: number }[] | null = null;
+          if (b.seg.nodes.length === 1 && isList(b.node)) {
+            try {
+              const tree = remark.parse(relaxLists(b.seg.src)) as MdNode;
+              const lists = (tree.children ?? []).filter((k) => k.type === 'list');
+              const found: { from: number; to: number }[] = [];
+              if (lists.length === 1 && (tree.children ?? []).length === 1 && itemsIn(lists[0], b.node, b.from + 1, b.l0, s, found) && found.length) items = found;
+            } catch { /* the whole list, then */ }
+          }
+          marked.push(...(items ?? [{ from: b.from, to: b.to }]));
+        }
+      }
+      for (const m of marked) decos.push(Decoration.node(m.from, m.to, { class: s.offer ? 'rv-mine' : 'rv-add' }));
+      // What was taken out is shown above the change; what is offered, below your own lines.
+      const next = blocks.find((b) => b.l1 >= s.start);
+      const at = s.offer ? (marked.length ? marked[marked.length - 1].to : next ? next.from : pos) : (marked.length ? marked[0].from : next ? next.from : pos);
+      decos.push(Decoration.widget(at, box(s), { side: s.offer ? 1 : -1, key: `${s.id}:${(s.offer ?? s.old).length}`, ignoreSelection: true, stopEvent: () => true }));
+      sig += `${s.id}@${at}:${marked.map((m) => `${m.from}-${m.to}`).join(',')};`;
+    }
+    if (sig === painted) return;
+    painted = sig;
+    view.dispatch(view.state.tr.setMeta(reviewKey, DecorationSet.create(view.state.doc, decos)).setMeta('addToHistory', false));
+  };
+  const offChanges = onChanges(paint);
+  // Before a change from outside is merged in, what was typed here in the last moment is written to the file's text.
+  const offFlush = bus.on('note.flush', (m: unknown) => { if (m === model && !destroyed && !applying) save(); });
 
   load(model.getValue());
   onReadOnly(null);
@@ -605,6 +816,8 @@ export async function mountRich(root: HTMLElement, model: monacoNs.editor.ITextM
       if (hit) view.dispatch(tr);
       editor.action(insert(md, true));
     },
-    destroy() { destroyed = true; closeLinkBox(); sub.dispose(); editor.destroy(); },
+    /** ⌘F's searcher for this note (richFind.ts). */
+    finder(report: (f: Found) => void) { return richFinder(view, report); },
+    destroy() { destroyed = true; offChanges(); offFlush(); closeLinkBox(); sub.dispose(); editor.destroy(); },
   };
 }

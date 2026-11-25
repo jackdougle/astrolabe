@@ -11,6 +11,7 @@ import { getTheme, monacoTheme, Theme } from './themes';
 import { EXIT_MS } from './motion';
 import { bus } from './panes';
 import { useStore } from './store';
+import * as review from './review';
 
 (self as any).MonacoEnvironment = {
   getWorker(_id: string, label: string) {
@@ -55,7 +56,7 @@ setMonacoTheme(getTheme(useStore.getState().settings.theme));
 
 // ---------- file models ----------
 
-interface FileEntry { model: monaco.editor.ITextModel; savedVersion: number; mtime: number; conflict?: number }
+interface FileEntry { model: monaco.editor.ITextModel; savedVersion: number; mtime: number; /** The file's text as last read from or written to disk. */ disk: string }
 const files = new Map<string, FileEntry>();
 const saving = new Set<string>();
 const isDirty = (entry: FileEntry) => entry.model.getAlternativeVersionId() !== entry.savedVersion;
@@ -99,7 +100,7 @@ export function loadFile(path: string): Promise<FileEntry | { error: string }> {
       if (res.error) return { error: res.error as string };
       const uri = monaco.Uri.file(path);
       const model = monaco.editor.getModel(uri) ?? monaco.editor.createModel(res.text, undefined, uri);
-      const entry: FileEntry = { model, savedVersion: model.getAlternativeVersionId(), mtime: res.mtime };
+      const entry: FileEntry = { model, savedVersion: model.getAlternativeVersionId(), mtime: res.mtime, disk: res.text };
       model.onDidChangeContent(() => {
         useStore.getState().setDirty(path, model.getAlternativeVersionId() !== entry.savedVersion);
       });
@@ -107,6 +108,7 @@ export function loadFile(path: string): Promise<FileEntry | { error: string }> {
       syncWatch();
       const unsaved = leftBehind()?.unsaved[path];
       if (unsaved !== undefined) { delete leftBehind()!.unsaved[path]; if (unsaved !== model.getValue()) model.setValue(unsaved); }
+      review.restore(model);
       return entry;
     })().finally(() => loading.delete(path));
     loading.set(path, p);
@@ -119,13 +121,14 @@ export async function saveFile(path: string) {
   if (!entry) return false;
   // What is on disk afterwards is this version of the text, even if more is typed while it is being written.
   const version = entry.model.getAlternativeVersionId();
+  const text = entry.model.getValue();
   saving.add(path);
   let res;
-  try { res = await api.fs.writeFile(path, entry.model.getValue()); } finally { saving.delete(path); }
+  try { res = await api.fs.writeFile(path, text); } finally { saving.delete(path); }
   if (!res.ok) { useStore.getState().showToast(`Could not save: ${res.error}`); return false; }
   entry.savedVersion = version;
   entry.mtime = res.mtime;
-  entry.conflict = undefined;
+  entry.disk = text;
   useStore.getState().setDirty(path, isDirty(entry));
   useStore.getState().keepFile(path); // a saved file's tab is no longer a temporary one
   return true;
@@ -143,7 +146,7 @@ export function moveFiles(from: string, to: string) {
     files.delete(path);
     if (!dirty) continue;
     const model = monaco.editor.createModel(text, undefined, monaco.Uri.file(next));
-    const moved: FileEntry = { model, savedVersion: -1, mtime: 0 };
+    const moved: FileEntry = { model, savedVersion: -1, mtime: 0, disk: '' };
     model.onDidChangeContent(() => { useStore.getState().setDirty(next, model.getAlternativeVersionId() !== moved.savedVersion); });
     files.set(next, moved);
   }
@@ -159,51 +162,45 @@ export function releaseFile(path: string) {
     const s = useStore.getState();
     const stillOpen = Object.values(s.panes).some((p) => p.kind === 'editor' && p.files.some((f) => f.path === path));
     if (stillOpen) return;
-    files.get(path)?.model.dispose();
+    const model = files.get(path)?.model;
+    if (model) review.forget(model);
+    model?.dispose();
     files.delete(path);
     syncWatch();
     s.setDirty(path, false);
   }, EXIT_MS + 40);
 }
 
-/** Replaces only the part of the buffer that differs from `text`, so the caret and scroll position stay put around it. */
-function applyDiskText(path: string, entry: FileEntry, text: string) {
-  const model = entry.model;
-  const old = model.getValue();
-  if (text !== old) {
-    const max = Math.min(old.length, text.length);
-    let a = 0;
-    while (a < max && old.charCodeAt(a) === text.charCodeAt(a)) a++;
-    let b = 0;
-    while (b < max - a && old.charCodeAt(old.length - 1 - b) === text.charCodeAt(text.length - 1 - b)) b++;
-    // Never cut a CRLF line ending in half.
-    if (a > 0 && old.charCodeAt(a - 1) === 13) a--;
-    if (b > 0 && old.charCodeAt(old.length - b) === 10 && old.charCodeAt(old.length - b - 1) === 13) b--;
-    const range = monaco.Range.fromPositions(model.getPositionAt(a), model.getPositionAt(old.length - b));
-    model.pushEditOperations([], [{ range, text: text.slice(a, text.length - b) }], () => null);
-  }
-  entry.savedVersion = model.getAlternativeVersionId();
-  useStore.getState().setDirty(path, false);
-}
+// A change made to an open file from outside goes into its text, around any unsaved typing, and is marked there to be
+// looked at (review.ts). The file is saved again after a change is undone, when nothing else in it is unsaved.
+review.host.isDirty = (model) => { for (const e of files.values()) if (e.model === model) return isDirty(e); return true; };
+review.host.save = (model) => { for (const [path, e] of files) if (e.model === model) void saveFile(path); };
 
 async function refreshOnce(path: string) {
   const entry = files.get(path);
   if (!entry || entry.model.isDisposed() || saving.has(path)) return;
   const st = await api.fs.stat(path);
   if (!st.exists || st.mtime <= entry.mtime || saving.has(path)) return;
-  if (isDirty(entry)) {
-    // Unsaved typing is never replaced. Say once that the file moved on underneath it.
-    if (entry.conflict !== st.mtime) {
-      entry.conflict = st.mtime;
-      useStore.getState().showToast(`${basename(path)} changed on disk. Your unsaved edits are kept; saving will overwrite the new version.`, 6000);
-    }
-    return;
-  }
   const res = await api.fs.readFile(path);
-  if (res.error || entry.model.isDisposed() || isDirty(entry) || saving.has(path) || files.get(path) !== entry) return;
-  applyDiskText(path, entry, res.text);
+  if (res.error || entry.model.isDisposed() || saving.has(path) || files.get(path) !== entry) return;
   entry.mtime = res.mtime;
+  if (res.text === entry.disk) return; // touched, not changed
+  // Typing in a rendered note reaches the text a moment after the keys: have it now, so it is merged, not lost.
+  bus.emit('note.flush', entry.model);
+  const dirty = isDirty(entry);
+  const out = review.takeOutside(entry.model, entry.disk, res.text, useStore.getState().settings.reviewChanges);
+  entry.disk = res.text;
+  if (!dirty) {
+    // The text is the file's again, changes and all.
+    entry.savedVersion = entry.model.getAlternativeVersionId();
+    useStore.getState().setDirty(path, false);
+  } else if (out.clashes) {
+    useStore.getState().showToast(`${basename(path)} changed on disk where you have unsaved edits. Yours are kept; the other version is shown beside them.`, 6000);
+  }
 }
+
+/** The changes from outside still waiting to be looked at in a file. */
+export const reviewOf = (path: string) => review.spans(files.get(path)?.model);
 
 const refreshing = new Map<string, boolean>(); // path -> whether another pass was asked for meanwhile
 /** Pick up an edit made outside the editor (by an agent, a command, another app) to a file with no unsaved changes. */

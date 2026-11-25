@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, basename } from '../lib/api';
 import { commands, formatKeys, hotkeys } from '../lib/commands';
-import { applyHeadingFont, applyNotesFont, FontInfo, googleFonts, loadGoogleFont, SYSTEM } from '../lib/fonts';
+import { applyHeadingFont, applyNotesFont, BUNDLED, faceOf, FontInfo, googleFonts, loadGoogleFont, SYSTEM } from '../lib/fonts';
 import { fuzzyFilter } from '../lib/fuzzy';
 import { history, MONO, setMonacoTheme } from '../lib/monaco';
 import { bus, focusPane } from '../lib/panes';
-import { activeTermPane, focusedId, isMarkdown, PaletteMode, projectRoot, Settings, useStore } from '../lib/store';
+import { activeTermPane, focusedId, isMarkdown, outputWeight, PaletteMode, projectRoot, Settings, useStore } from '../lib/store';
 import { applyTheme, getTheme, THEMES } from '../lib/themes';
 
 interface Row { key: string; label: string; detail?: string; hint?: string; positions?: number[]; /** `side`: chosen with ⌘ held. */ run: (side?: boolean) => void; preview?: () => void; /** CSS font stack the label is drawn in. */ face?: string; /** Google Fonts family to fetch once the row is on screen. */ load?: string }
@@ -35,6 +35,7 @@ const PARENT: Partial<Record<PaletteMode, PaletteMode>> = {
 
 type Choice = Omit<Row, 'positions'>;
 const SCROLL_STEPS = [1, 1.5, 2, 2.5, 3, 4];
+const WEIGHTS: Record<number, string> = { 400: 'Regular', 500: 'Medium', 600: 'Semibold' };
 const SIZE_STEPS = {
   fontSize: [11, 12, 12.5, 13, 14, 15, 16],
   notesSize: [0.9, 1, 1.1, 1.2, 1.35],
@@ -79,7 +80,7 @@ function PaletteBody({ initial }: { initial: PaletteMode }) {
   };
   const go = (next: PaletteMode) => { revertPreview(); setMode(next); setQuery(''); };
   const back = () => { const parent = PARENT[mode]; if (parent) go(parent); else close(); };
-  const flip = (key: 'wordWrap' | 'smoothCaret' | 'restoreSession' | 'previewTabs' | 'starfield' | 'noteTitle' | 'titleWires') => {
+  const flip = (key: 'wordWrap' | 'smoothCaret' | 'restoreSession' | 'previewTabs' | 'reviewChanges' | 'starfield' | 'noteTitle' | 'titleWires') => {
     const patch: Partial<Settings> = { [key]: !useStore.getState().settings[key] };
     useStore.getState().updateSettings(patch);
   };
@@ -102,6 +103,8 @@ function PaletteBody({ initial }: { initial: PaletteMode }) {
 
   const rows: Row[] = useMemo(() => {
     const on = (b: boolean) => (b ? 'On' : 'Off');
+    const weightNow = Number(outputWeight(settings));
+    const weightNext = weightNow >= 600 ? 400 : weightNow + 100;
     if (mode === 'settings') return choose([
       { key: 'appearance', label: 'Appearance and themes', detail: getTheme(settings.theme).name, run: () => go('appearance') },
       { key: 'fonts', label: 'Fonts', detail: settings.fontFamily || 'Commit Mono', run: () => go('fonts') },
@@ -124,6 +127,7 @@ function PaletteBody({ initial }: { initial: PaletteMode }) {
       { key: 'code', label: 'Terminal and code font', detail: settings.fontFamily || 'Commit Mono, built in', run: () => go('fonts-code') },
       { key: 'notes', label: 'Notes text font', detail: settings.notesFont || 'SF Pro, built in', run: () => go('fonts-notes') },
       { key: 'headings', label: 'Notes heading font', detail: settings.headingFont || 'Literata, built in', run: () => go('fonts-headings') },
+      { key: 'outputWeight', label: `Terminal text weight: ${WEIGHTS[weightNow]}`, detail: `click for ${WEIGHTS[weightNext].toLowerCase()}`, run: () => useStore.getState().updateSettings({ outputWeight: weightNext }) },
     ]);
     // Sizes and options stay open while you change them, so you can try several in a row.
     if (mode === 'sizes') return choose([
@@ -137,6 +141,7 @@ function PaletteBody({ initial }: { initial: PaletteMode }) {
       return choose([
         { key: 'caret', label: 'Smooth caret', detail: on(settings.smoothCaret), run: () => flip('smoothCaret') },
         { key: 'preview', label: 'Temporary tabs for opened files', detail: on(settings.previewTabs), run: () => flip('previewTabs') },
+        { key: 'review', label: 'Mark changes made from outside, to keep or undo', detail: on(settings.reviewChanges), run: () => flip('reviewChanges') },
         { key: 'restore', label: 'Reopen last session on launch', detail: on(settings.restoreSession), run: () => flip('restoreSession') },
         { key: 'scroll', label: `Scroll speed ${settings.scrollSpeed}×`, detail: `click for ${next}×`, run: () => useStore.getState().updateSettings({ scrollSpeed: next }) },
       ]);
@@ -146,7 +151,9 @@ function PaletteBody({ initial }: { initial: PaletteMode }) {
       const code = mode === 'fonts-code';
       const headings = mode === 'fonts-headings';
       const apply = headings ? applyHeadingFont : applyNotesFont;
-      const pool: FontInfo[] = [{ family: '', category: code ? 'Built in: Commit Mono' : headings ? 'Built in: Literata' : 'Built in: SF Pro' }, ...(code ? fonts.filter((f) => f.category === 'Monospace') : fonts)];
+      // The families that ship with the app come first for notes, and are there even when the catalogue could not be fetched.
+      const shipped: FontInfo[] = code ? [] : Object.keys(BUNDLED).map((family) => ({ family, category: 'Built in' }));
+      const pool: FontInfo[] = [{ family: '', category: code ? 'Built in: Commit Mono' : headings ? 'Built in: Literata' : 'Built in: SF Pro' }, ...shipped, ...(code ? fonts.filter((f) => f.category === 'Monospace') : fonts.filter((f) => !BUNDLED[f.family]))];
       const current = code ? originalFonts.current.code : headings ? originalFonts.current.headings : originalFonts.current.notes;
       const builtIn = code ? MONO : headings ? LITERATA_FACE : SYSTEM;
       // Applies the font at once. Its stack falls back to the built-in face until the file arrives, so nothing waits on the network;
@@ -164,7 +171,7 @@ function PaletteBody({ initial }: { initial: PaletteMode }) {
       };
       return fuzzyFilter(query, pool, (f) => f.family || 'Default', 70).map((h) => ({
         key: h.item.family || 'default', label: h.item.family || 'Default', positions: h.item.family ? h.positions : [],
-        face: h.item.family ? `"${h.item.family}", ${code ? MONO : SYSTEM}` : builtIn,
+        face: h.item.family ? `"${faceOf(h.item.family)}", ${code ? MONO : SYSTEM}` : builtIn,
         load: h.item.family || undefined,
         detail: h.item.category + (h.item.family === current ? ', in use' : ''),
         preview: () => preview(h.item.family),

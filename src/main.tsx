@@ -11,6 +11,8 @@ import '@fontsource-variable/instrument-sans';
 import '@fontsource-variable/literata/opsz.css';
 import '@fontsource-variable/literata/opsz-italic.css';
 import '@fontsource/ibm-plex-mono/500-italic.css'; // the note title
+import '@fontsource-variable/atkinson-hyperlegible-next/wght.css'; // a built-in choice for notes
+import '@fontsource-variable/atkinson-hyperlegible-next/wght-italic.css';
 import '@xterm/xterm/css/xterm.css';
 import './styles.css';
 import { api, loadAppInfo } from './lib/api';

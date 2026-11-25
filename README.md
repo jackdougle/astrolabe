@@ -42,7 +42,7 @@ The window has two areas side by side, the terminals and the editors, and they d
 
 ⌘U takes the terminal you're looking at off screen without stopping it. Whatever is running in it keeps running, and it keeps its place in its tab.
 
-While anything is hidden, a chip in the bottom right corner of the terminals says how many. Its terminal icon pulses while a command is running in one of them, like an agent working on a reply, and sits still otherwise. Click the chip for the list, and click a terminal in the list to bring it back where it was. ⇧⌘U brings them all back, and the first time you hide one a note at the top of the window reminds you of that key. Press ⇧⌘U again and the ones it brought back hide again, unless you have hidden something else in between.
+While anything is hidden, a chip in the bottom right corner of the terminals says how many. Its terminal icon pulses while a command is running in one of them, like an agent working on a reply, and sits still otherwise. Click the chip for the list, and click a terminal in the list to bring it back where it was. ⇧⌘U brings them all back, and the first time you hide one a note at the top of the window reminds you of that key. Press ⇧⌘U again and the ones it brought back hide again, unless you have hidden something else in between. When you type right next to the chip it goes almost fully see-through until you move the mouse.
 
 The window won't close while a terminal is hidden, and closing a tab leaves the terminals hidden in it alone. Quitting still ends them, like every other shell.
 
@@ -63,10 +63,14 @@ The keyboard button at the bottom of the navigator lists every hotkey, and you c
 | ⌘E, ⌘\ | Show or hide the editors, split the editor |
 | ⌃⌘F, ⌃⌘S, ⇧⌘↩ | Fill the window with one area, swap sides, maximize a pane |
 | ⌘G | The graph |
+| ⇧⌘B | Hide or show the top bar (the window's buttons go with it) |
+| ⌘0 | Light mode on or off. Going back restores the dark theme you had (⌥⌘0 resets zoom) |
 | ⇧⌘R | Markdown rendered or raw (lines always wrap; nothing scrolls sideways) |
-| ⌘K, ⌘F, ⇧⌘C | Clear the terminal, find in it, copy the last block's output |
+| ⌘F | Find in the note, file or terminal you're in: every match is marked and counted, Enter and ⇧Enter step through them, ⌘F again (or Esc) closes |
+| ⌘K, ⇧⌘C | Clear the terminal, copy the last block's output |
 | ⇧⌘A or `/file` | Attach files. Dropping or pasting them on a terminal does the same |
 | ⌥↑ ⌥↓, ⇧⌘K, ⌃L, ⌘↩ | Move a line, delete it, select it, start a new one below |
+| ⌘K (or ⌥⌘Y), ⌥⌘N | Keep or undo every change an agent made to the open file |
 | ⌘-click | Open a file path or link from terminal output or a note |
 
 ## Notes
@@ -74,14 +78,23 @@ The keyboard button at the bottom of the navigator lists every hotkey, and you c
 Markdown opens rendered, and ⇧⌘R switches to raw. Both views edit the same text. An edit in the rendered view only rewrites the blocks it touched, so the rest of the file stays exactly as it was written, and anything the rendered view can't show safely appears as an editable source block instead.
 
 - The line keys, bracket pairs and smooth caret work the same in both views.
-- `[] ` starts a to-do, `> ` a toggle and `" ` a quote. Typing a different marker at the start of a list item converts it, along with the items after it.
-- `--` becomes a dash and `->` an arrow as you type. `[words](address)` becomes a link, and so does a URL pasted over a selection. Link notation left as plain characters around an address that is already a link (`\[name]\(<address>)` in the file, which is what pasting formatted text can leave) shows as the name, linked.
-- A heading shows its `#`s only while the caret is on it. They're real text, so you can edit them to change the level.
+- `[] ` starts a to-do, `> ` a toggle and `" ` a quote. Typing a different marker at the start of a list item converts it, along with the items after it. Toggles stand apart: `> ` turns only that one note into a toggle, and what a toggle holds starts as bullets (or, for a toggle inside a numbered list, the next numbering style).
+- Numbered lists nest 1. → a. → i. → ■, counting every layer of notes. Tab and ⇧Tab move only the note you're on or the ones selected; what's nested under them stays put. Backspace on a line with nothing on it deletes the line.
+- Empty lines are blank lines in the file and lists are written tight, so the raw view holds exactly what the rendered one shows.
+- `> ` typed before or after a heading's `#`s, or at the start of a finished heading, makes it a toggle heading that holds its section. The arrow sits in front of the `#`s.
+- `--` becomes a dash and `->` an arrow as you type. `[words](address)` becomes a link, and so does a URL pasted over a selection. With words selected, ⌘K asks for an address and ⇧⌘V links them to the one on the clipboard. Link notation left as plain characters around an address that is already a link (`\[name]\(<address>)` in the file, which is what pasting formatted text can leave) shows as the name, linked.
+- A heading shows its `#`s, greyed, while the caret is on its line, and has none otherwise. They're real text, so editing them changes the level live, and typing `## ` straight after them just sets the level. Sizes step evenly from h1 (2.2× the text) down to h6, which is one pixel larger than the text.
 - The file name shows as the note's title, and editing the title renames the file.
 - Drop or paste a picture and it goes into the note. It's copied into `attachments/` beside the note, or uploaded if you've set `imageUpload`.
-- A word count sits in the bottom right corner. Click it for characters, paragraphs and reading time.
+- A word count sits in the bottom right corner. Click it for characters, paragraphs and reading time. Like the hidden-terminals chip, it goes see-through when you type right next to it.
 
-An open file reloads by itself when an agent or another program changes it on disk. A file with unsaved typing is left alone, and you get a notice instead.
+### When an agent edits a file you have open
+
+The change goes straight into the text you're looking at, and you keep typing. Each change is marked until you've looked at it: added lines are green, the lines they replaced are red above them, and each has its own Keep and Undo. A bar at the bottom counts them and has Keep all (⌘K) and Undo all (⌥⌘N). It works rendered and raw, for notes and code.
+
+Unsaved typing is never lost. The outside change is merged around it, and saving writes both. If the change lands on lines you've edited but not saved, your lines stay and the other version is shown under them with "Use this" and "Keep mine". Undo puts the old lines back and, if nothing else is unsaved, saves the file so the agent sees it too.
+
+Settings > Behaviour turns the marks off. Then changes just appear, still merged around your typing.
 
 ## The graph
 
@@ -106,7 +119,7 @@ A running copy watches the folder it was built from. When the source changes, a 
 
 ## Look
 
-The window is translucent over a blurred desktop, with a faint starfield behind the terminals. The default theme, Meridian, is blue on near-black, and "Change theme" in the palette has the others. The terminal, notes text and note headings can each use any Google Fonts family. Opening and closing things is animated briefly, and macOS's Reduce Motion turns that off.
+The window is translucent over a blurred desktop, with a faint starfield behind the terminals. The default theme, Meridian, is blue on near-black, and "Change theme" in the palette has the others. The terminal, notes text and note headings can each use any Google Fonts family. What programs print in a terminal is drawn in medium weight; Settings, Fonts has regular and semibold (`outputWeight` in the settings file). Opening and closing things is animated briefly, and macOS's Reduce Motion turns that off.
 
 ## Testing
 
@@ -118,4 +131,4 @@ This launches the built app against a throwaway config folder and runs a scenari
 
 ## Not built yet
 
-Agent integrations, notifications, code signing, find in the rendered Markdown view, dropping a tab into another window's row, and a smooth cursor inside running programs.
+Agent integrations, notifications, code signing, dropping a tab into another window's row, and a smooth cursor inside running programs.

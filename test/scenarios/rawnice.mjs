@@ -41,7 +41,7 @@ export default async function ({ page, shot, run, type, work }) {
   console.log('suggestions while typing prose:', await page.evaluate(() => !!document.querySelector('.suggest-widget.visible')));
   await undo(2);
   await page.keyboard.press('Meta+f'); await page.waitForTimeout(500);
-  console.log('⌘F find box:', await page.evaluate(() => !!document.querySelector('.editor-pane .find-widget.visible, .monaco-editor .find-widget.visible')));
+  console.log('⌘F find box:', await page.evaluate(() => !!document.querySelector('.editor-pane .findbar')));
   await page.keyboard.press('Escape'); await page.waitForTimeout(200);
   console.log('file as it began:', (await value()) === text);
 

@@ -1,11 +1,14 @@
+import * as monaco from 'monaco-editor';
 import { api, appInfo, basename, dirname, joinPath } from './api';
 import { GRAPH, graphRoot, isGraph } from './graph';
 import { leaves } from './layout';
 import { fileEntry, moveFiles, releaseFile, saveFile } from './monaco';
 import { carried, carry } from './handoff';
+import { waiting } from './review';
 import { bus, focusPane } from './panes';
 import { activePane, activeTab, focusedId, hiddenTerms, isMarkdown, liveEditors, openFiles, projectRoot, showing, tabGroups, useStore } from './store';
 import { getSession } from './termSession';
+import { getTheme, THEMES } from './themes';
 
 /** `keyWhen` holds a further condition for one of the keys alone: the command's other keys work without it. */
 export interface Command { id: string; title: string; keys?: string[]; run: () => void; when?: () => boolean; keyWhen?: Record<string, () => boolean> }
@@ -13,11 +16,22 @@ export interface Command { id: string; title: string; keys?: string[]; run: () =
 const S = () => useStore.getState();
 const term = () => { const p = activePane(); return p?.kind === 'terminal' ? p : null; };
 const editor = () => { const p = activePane(); return p?.kind === 'editor' ? p : null; };
+/** How many changes made from outside are waiting in the file the keyboard is in. */
+const changesHere = () => { const e = editor(); return e?.active ? waiting(fileEntry(e.active)?.model) : 0; };
 const refocus = () => { const id = focusedId(); if (id) focusPane(id); };
 /** The keyboard is in the text of a rendered note. */
 const inRendered = () => !!(document.activeElement as HTMLElement | null)?.closest?.('.rich');
 /** The keyboard is in a file shown as text (raw Markdown, or code): VS Code's editor, with its own keys. */
+/** Words are selected in a rendered note: ⌘K and ⇧⌘V there make them a link (richMarkdown.ts). */
+const richSelected = () => { const sel = window.getSelection(); return inRendered() && !!sel && !sel.isCollapsed; };
 const inRaw = () => !!(document.activeElement as HTMLElement | null)?.closest?.('.editor-pane .monaco-editor');
+/** Words are selected in a note, rendered or raw: ⌘U there underlines them (richUnderline.ts, EditorPane.tsx). */
+const canUnderline = () => {
+  if (richSelected()) return true;
+  if (!inRaw()) return false;
+  const ed = monaco.editor.getEditors().find((x) => x.hasTextFocus());
+  return ed?.getModel()?.getLanguageId() === 'markdown' && !!ed.getSelections()?.some((x) => !x.isEmpty());
+};
 /** Terminals and editors are both open, so the keyboard can cross and the two can change sides. */
 const bothAreas = () => liveEditors(S()).length > 0 && tabGroups(S()).length > 0;
 
@@ -284,6 +298,20 @@ async function fileClosed(path: string) {
   bus.emit('fs.changed');
 }
 
+/** Switches between light and dark. A theme with a twin goes to it (Tokyo Night to Tokyo Night Day, GitHub Dark to
+ *  GitHub Light), and back from the twin to the very theme you left (Storm comes back as Storm). Otherwise it goes to
+ *  the theme in use before the last switch when that is of the other kind, else to the first theme of the other kind. */
+function toggleLight() {
+  const now = getTheme(S().settings.theme);
+  const before = THEMES.find((t) => t.id === S().settings.themeBefore);
+  const twin = THEMES.find((t) => t.id === now.twin && t.dark !== now.dark);
+  const back = before && before.dark !== now.dark ? before : undefined;
+  const next = (back && (!twin || back.twin === now.id) ? back : twin ?? back) ?? THEMES.find((t) => t.dark !== now.dark);
+  if (!next) return;
+  S().updateSettings({ theme: next.id, themeBefore: now.id });
+  S().showToast(next.dark ? 'Dark mode' : 'Light mode');
+}
+
 function zoom(delta: number | null) {
   const z = delta === null ? 1 : Math.round((S().settings.zoom + delta) * 100) / 100;
   S().updateSettings({ zoom: Math.min(1.6, Math.max(0.6, z)) });
@@ -343,7 +371,7 @@ export const commands: Command[] = [
   // ⌘U hides, ⇧⌘U unhides. (Not H or J keys: ⌘H and ⌥⌘H are macOS's own and hide the whole app or every other
   // one, which is another kind of hiding, and other apps take ⇧⌘J from anywhere.) The terminal is the one used
   // last in the tab in front, wherever the keyboard is, as long as the terminals are on screen.
-  { id: 'term.hide', title: 'Hide this terminal (it keeps running)', keys: ['cmd+u'], when: () => showing(S()) !== 'editor' && tabGroups(S()).some((t) => t.id === S().activeTab), run: () => {
+  { id: 'term.hide', title: 'Hide this terminal (it keeps running)', keys: ['cmd+u'], keyWhen: { 'cmd+u': () => !canUnderline() }, when: () => showing(S()) !== 'editor' && tabGroups(S()).some((t) => t.id === S().activeTab), run: () => {
     const before = hiddenTerms(S()).length;
     S().hideTerm(); refocus();
     if (hiddenTerms(S()).length > before) hideHint();
@@ -403,7 +431,8 @@ export const commands: Command[] = [
   { id: 'palette.settings', title: 'Settings: appearance, fonts, font sizes, behaviour', run: () => S().openPalette('settings') },
   { id: 'palette.keys', title: 'Hotkeys: every keyboard shortcut', run: () => S().openPalette('keys') },
   { id: 'term.clear', title: 'Clear terminal', keys: ['cmd+k'], when: () => !!term(), run: () => { getSession(term()!.id)?.clear(); } },
-  { id: 'term.find', title: 'Find in terminal', keys: ['cmd+f'], when: () => !!term(), run: () => bus.emit('term.find', term()!.id) },
+  // One bar for all three: a terminal, a file shown as text, a rendered note (find.ts). Pressed again, it closes.
+  { id: 'find', title: 'Find in the file or terminal you are in', keys: ['cmd+f'], when: () => !!activePane(), run: () => bus.emit('find.toggle', activePane()!.id) },
   { id: 'term.blockPrev', title: 'Select previous block', keys: ['cmd+arrowup'], when: () => !!term() && term()!.atPrompt, run: () => getSession(term()!.id)?.selectRelative(-1) },
   { id: 'term.blockNext', title: 'Select next block', keys: ['cmd+arrowdown'], when: () => !!term() && term()!.atPrompt, run: () => getSession(term()!.id)?.selectRelative(1) },
   { id: 'term.copyOutput', title: 'Copy output of selected or last block', keys: ['cmd+shift+c'], when: () => !!term(), run: () => {
@@ -419,14 +448,21 @@ export const commands: Command[] = [
   { id: 'file.attach', title: 'Attach files from Finder', keys: ['cmd+shift+a'], run: () => { pickAndAttach(); } },
   { id: 'editor.copyPath', title: 'Copy the full path of this file', keys: ['alt+cmd+c'], when: () => !!editor()?.active, run: () => { api.clipboard.write(editor()!.active!); S().showToast('Path copied'); } },
   { id: 'editor.uploadImages', title: 'Upload the pictures in this note', when: () => !!editor()?.active && isMarkdown(editor()!.active!), run: () => { void uploadNoteImages(editor()!.active!); } },
+  { id: 'review.keepAll', title: 'Keep every change made to this file from outside', keys: ['cmd+k', 'alt+cmd+y'], keyWhen: { 'cmd+k': () => !richSelected() }, when: () => !!changesHere(), run: () => bus.emit('review.act', { pane: editor()!.id, what: 'keep' }) },
+  { id: 'review.undoAll', title: 'Undo every change made to this file from outside', keys: ['alt+cmd+n'], when: () => !!changesHere(), run: () => bus.emit('review.act', { pane: editor()!.id, what: 'undo' }) },
+  { id: 'review.next', title: 'Go to the next change made from outside', keys: ['alt+f5'], when: () => !!changesHere(), run: () => bus.emit('review.act', { pane: editor()!.id, what: 'next' }) },
+  { id: 'review.prev', title: 'Go to the previous change made from outside', keys: ['shift+alt+f5'], when: () => !!changesHere(), run: () => bus.emit('review.act', { pane: editor()!.id, what: 'prev' }) },
+  { id: 'review.toggle', title: 'Mark changes made to open files from outside, to keep or undo (on or off)', run: () => { S().updateSettings({ reviewChanges: !S().settings.reviewChanges }); S().showToast(S().settings.reviewChanges ? 'Outside changes are marked for you to keep or undo' : 'Outside changes just appear'); } },
   { id: 'editor.save', title: 'Save file', keys: ['cmd+s'], when: () => !!editor()?.active, run: async () => { const e = editor()!; if (await saveFile(e.active!)) S().showToast('Saved'); } },
   { id: 'editor.toggleCaret', title: 'Turn smooth caret on or off', run: () => { S().updateSettings({ smoothCaret: !S().settings.smoothCaret }); S().showToast(S().settings.smoothCaret ? 'Smooth caret on' : 'Smooth caret off'); } },
-  { id: 'editor.toggleRendered', title: 'Switch Markdown between rendered and raw', keys: ['cmd+shift+r', 'cmd+shift+v'], when: () => !!editor()?.active && isMarkdown(editor()!.active!), run: () => { const e = editor()!; S().toggleRendered(e.id, e.active!); refocus(); } },
+  { id: 'editor.toggleRendered', title: 'Switch Markdown between rendered and raw', keys: ['cmd+shift+r', 'cmd+shift+v'], keyWhen: { 'shift+cmd+v': () => !richSelected() }, when: () => !!editor()?.active && isMarkdown(editor()!.active!), run: () => { const e = editor()!; S().toggleRendered(e.id, e.active!); refocus(); } },
   // No key of its own: the notice at the top of the window (UpdateNotice in App.tsx) offers it whenever the source folder has changed.
   { id: 'app.update', title: 'Update Astrolabe from its source folder', run: () => { void updateApp(); } },
   { id: 'view.zoomIn', title: 'Zoom in', keys: ['cmd+='], run: () => zoom(0.1) },
   { id: 'view.zoomOut', title: 'Zoom out', keys: ['cmd+-'], run: () => zoom(-0.1) },
-  { id: 'view.zoomReset', title: 'Reset zoom', keys: ['cmd+0'], run: () => zoom(null) },
+  { id: 'view.zoomReset', title: 'Reset zoom', keys: ['alt+cmd+0'], run: () => zoom(null) },
+  { id: 'view.topBar', title: 'Show or hide the top bar', keys: ['cmd+shift+b'], run: () => S().updateSettings({ topBar: !S().settings.topBar }) },
+  { id: 'view.light', title: 'Light mode on or off', keys: ['cmd+0'], run: () => toggleLight() },
   { id: 'settings.open', title: 'Open settings file', keys: ['cmd+,'], run: async () => {
     const st = await api.fs.stat(appInfo.settingsFile);
     if (!st.exists) await api.settings.save(S().settings);
@@ -501,6 +537,7 @@ const OTHER_KEYS: [title: string, keys: string][] = [
   ['Notes and code: new line below, or tick the task on this line', '⌘↩'],
   ['Notes and code: cut or copy the line, with nothing selected', '⌘X  ⌘C'],
   ['Notes: strike through', '⇧⌘X'],
+  ['Notes: underline the selected words', '⌘U'],
   ['Notes: indent or outdent a list item', '⇥  ⇧⇥'],
   ['Notes: bold, in a rendered note', '⌘B'],
   ['Raw Markdown: outline of headings', '⇧⌘O'],
