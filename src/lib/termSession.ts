@@ -859,21 +859,50 @@ export class TermSession {
     try {
       const core = (this.term as any)._core;
       const lines = core._bufferService.buffer.lines;
+      const cols = this.term.cols;
+      /** Cells on `row` that belong to `uri`, and the urlIds those cells use. */
       const piece = (row: number) => {
         const marks = lines.get(row)?._extendedAttrs as Record<number, { urlId?: number } | undefined> | undefined;
         let a = -1; let b = -1;
+        const ids = new Set<number>();
         for (const k in marks) {
           const id = marks[k]?.urlId;
           if (!id || core._oscLinkService.getLinkData(id)?.uri !== uri) continue;
           const x = Number(k);
-          if (x >= this.term.cols) continue;
+          if (x >= cols) continue;
+          ids.add(id);
           if (a < 0 || x < a) a = x;
           if (x > b) b = x;
         }
-        return a < 0 ? null : { row, x: a, w: b - a + 1 };
+        return a < 0 ? null : { row, x: a, w: b - a + 1, ids };
       };
-      // Row after row, for as long as each holds a piece of the same link.
-      for (const step of [-1, 1]) for (let row = y - 1 + step, n = 0; n < 12 && row >= 0; row += step, n++) { const p = piece(row); if (!p) break; out.push(p); }
+      // A program that opens OSC 8 and never closes it leaves the same urlId on every cell after the
+      // link (Claude Code's prompt, after a pasted URL, has done this). Matching by URI alone then
+      // underlines every row below. Same urlId only continues when the link actually runs onto the
+      // next row (wrapped, or written to the right edge). A fresh OSC 8 open of the same address
+      // (different urlId) is still a piece of the link — Claude Code breaks long file links that way.
+      const atEdge = (p: { x: number; w: number }) => p.x + p.w >= cols;
+      const wrapped = (row: number) => !!this.term.buffer.active.getLine(row)?.isWrapped;
+      for (const step of [-1, 1]) {
+        let prev = piece(y - 1);
+        if (!prev) break;
+        let chain = new Set(prev.ids);
+        for (let row = y - 1 + step, n = 0; n < 12 && row >= 0; row += step, n++) {
+          const p = piece(row);
+          if (!p) break;
+          const shared = [...p.ids].some((id) => chain.has(id));
+          if (shared) {
+            // Same OSC 8 span: only if it continues from the higher row onto the lower.
+            const higher = step > 0 ? prev : p;
+            const lower = step > 0 ? row : prev.row;
+            if (!atEdge(higher) && !wrapped(lower)) break;
+          }
+          // else: same URI, new urlId — a program re-opened the link on this row.
+          out.push({ row: p.row, x: p.x, w: p.w });
+          for (const id of p.ids) chain.add(id);
+          prev = p;
+        }
+      }
     } catch {}
     return out;
   }
