@@ -3,7 +3,7 @@
 // words (they stay as plain text). (⌘-click still goes straight there.)
 import type { EditorView } from '@milkdown/kit/prose/view';
 import type { Mark } from '@milkdown/kit/prose/model';
-import { appInfo, dirname } from './api';
+import { api, appInfo, dirname } from './api';
 import { openLink } from './links';
 
 const BIN = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M2.8 4.3h10.4"/><path d="M6.2 4.3V2.9h3.6v1.4"/><path d="M4.1 4.3l.7 8.8h6.4l.7-8.8"/><path d="M6.8 6.6v4.3M9.2 6.6v4.3"/></svg>';
@@ -40,7 +40,8 @@ export function showLinkBox(view: EditorView, a: HTMLAnchorElement, event: Mouse
   const file = (view.dom.closest('[data-file]') as HTMLElement | null)?.dataset.file;
   const box = document.createElement('div');
   box.className = 'link-box';
-  box.innerHTML = `<button class="link-go" type="button"><span></span></button><button class="link-edit" type="button" title="Edit link">${PENCIL}</button><button class="link-remove" type="button" title="Remove link">${BIN}</button>`;
+  box.innerHTML = `<button class="link-head" type="button" hidden><img alt="" hidden><span></span></button><div class="link-row"><button class="link-go" type="button"><span></span></button><button class="link-edit" type="button" title="Edit link">${PENCIL}</button><button class="link-remove" type="button" title="Remove link">${BIN}</button></div>`;
+  const head = box.querySelector('.link-head') as HTMLButtonElement;
   const go = box.querySelector('.link-go') as HTMLButtonElement;
   const edit = box.querySelector('.link-edit') as HTMLButtonElement;
   const remove = box.querySelector('.link-remove') as HTMLButtonElement;
@@ -76,10 +77,24 @@ export function showLinkBox(view: EditorView, a: HTMLAnchorElement, event: Mouse
   window.addEventListener('resize', place);
   place();
 
-  go.addEventListener('click', () => {
+  const follow = () => {
     shut();
     if (href) void openLink(href, file ? dirname(file) : appInfo.home);
-  });
+  };
+  go.addEventListener('click', follow);
+  head.addEventListener('click', follow);
+  // A web address gets the page's title and icon above it once they arrive (looked up by the main process).
+  if (/^https?:\/\//i.test(href) && api.app.linkPreview) {
+    void api.app.linkPreview(href).then(({ title, icon }) => {
+      if (close !== shut || box.classList.contains('is-editing') || (!title && !icon)) return;
+      const img = head.querySelector('img')!;
+      if (icon) { img.src = icon; img.hidden = false; img.onerror = () => { img.hidden = true; }; }
+      head.querySelector('span')!.textContent = title || new URL(href).hostname;
+      head.title = title ?? '';
+      head.hidden = false;
+      place();
+    });
+  }
   edit.addEventListener('click', () => {
     const input = document.createElement('input');
     input.className = 'link-input';

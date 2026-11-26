@@ -81,6 +81,8 @@ const api = {
   search: { run: (opts: unknown) => ipcRenderer.invoke('search:run', opts) },
   app: {
     info: () => ipcRenderer.invoke('app:info'),
+    /** The title and icon (a data: URL) of the web page at `address`, as far as they can be found. */
+    linkPreview: (address: string) => ipcRenderer.invoke('link:preview', address) as Promise<{ title?: string; icon?: string }>,
     zoom: (factor: number) => ipcRenderer.send('app:zoom', factor),
     unsavedCount: (n: number) => ipcRenderer.send('app:unsavedCount', n),
     checkUpdate: () => ipcRenderer.invoke('app:checkUpdate') as Promise<'dev' | 'no-source' | 'current' | 'reload' | 'relaunch' | 'busy'>,

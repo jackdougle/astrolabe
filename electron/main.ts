@@ -931,6 +931,90 @@ const guarded = {
     ipcMain.on(channel, (e, ...args) => { if (trusted(e)) fn(e, ...args); else if (channel === 'app:shot') e.returnValue = 0; }),
 };
 
+// The title and icon of a web page, for the box a clicked link in a note shows. Only http(s), only the first
+// 512 KB of the page and 256 KB of the icon, no cookies sent, and nothing at all if it takes more than 6 seconds.
+const previews = new Map<string, Promise<{ title?: string; icon?: string }>>();
+async function readCapped(res: Response, cap: number) {
+  const reader = res.body?.getReader();
+  if (!reader) return new Uint8Array();
+  const parts: Uint8Array[] = []; let size = 0;
+  while (size < cap) {
+    const { done, value } = await reader.read();
+    if (done || !value) break;
+    parts.push(value); size += value.length;
+  }
+  void reader.cancel().catch(() => {});
+  const out = new Uint8Array(Math.min(size, cap)); let at = 0;
+  for (const p of parts) { const take = p.subarray(0, out.length - at); out.set(take, at); at += take.length; if (at >= out.length) break; }
+  return out;
+}
+const unescapeHtml = (t: string) => t.replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi, (m, c: string) => {
+  const k = c.toLowerCase();
+  if (k[0] === '#') { const n = k[1] === 'x' ? parseInt(k.slice(2), 16) : parseInt(k.slice(1), 10); return Number.isFinite(n) && n > 0 && n < 0x110000 ? String.fromCodePoint(n) : m; }
+  return ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' } as Record<string, string>)[k] ?? m;
+});
+function linkPreview(address: string) {
+  let url: URL;
+  try { url = new URL(address); } catch { return Promise.resolve({}); }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return Promise.resolve({});
+  const key = url.href;
+  const known = previews.get(key);
+  if (known) return known;
+  const job = (async () => {
+    const stop = AbortSignal.timeout(6000);
+    const get = (u: string, accept: string) => net.fetch(u, { signal: stop, credentials: 'omit', headers: { accept, 'user-agent': 'Mozilla/5.0 (Macintosh) Astrolabe' } } as RequestInit);
+    const res = await get(url.href, 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.5');
+    const final = new URL(res.url || url.href);
+    const type = res.headers.get('content-type') ?? '';
+    let title: string | undefined;
+    let iconUrl = new URL('/favicon.ico', final).href;
+    if (res.ok && /html|xml/i.test(type)) {
+      const bytes = await readCapped(res, 512 * 1024);
+      const charset = /charset=([\w-]+)/i.exec(type)?.[1];
+      let html: string;
+      try { html = new TextDecoder(charset || 'utf-8').decode(bytes); } catch { html = new TextDecoder().decode(bytes); }
+      const body = html.search(/<body[\s>]/i);
+      const head = body > 0 ? html.slice(0, body) : html;
+      const meta = (name: string) => {
+        for (const tag of head.match(/<meta\b[^>]*>/gi) ?? []) {
+          const which = /\b(?:property|name)\s*=\s*["']?([^"'\s>]+)/i.exec(tag)?.[1]?.toLowerCase();
+          if (which === name) return /\bcontent\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(tag)?.slice(1).find((x) => x != null);
+        }
+        return undefined;
+      };
+      const raw = /<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(head)?.[1] ?? meta('og:title');
+      if (raw) title = unescapeHtml(raw).replace(/\s+/g, ' ').trim().slice(0, 300) || undefined;
+      // The biggest icon the page names, with an apple-touch-icon as the last resort (they are large and square).
+      let best = -1;
+      for (const tag of head.match(/<link\b[^>]*>/gi) ?? []) {
+        const rel = /\brel\s*=\s*["']?([^"'>]+)/i.exec(tag)?.[1]?.toLowerCase() ?? '';
+        const href = /\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(tag)?.slice(1).find((x) => x != null);
+        if (!href || !/(^|\s)(icon|apple-touch-icon)(\s|$)/.test(rel)) continue;
+        const size = Number(/\bsizes\s*=\s*["']?(\d+)/i.exec(tag)?.[1] ?? 16);
+        const score = (rel.includes('apple') ? 0 : 1000) + Math.min(size, 256);
+        try { if (score > best) { iconUrl = new URL(unescapeHtml(href), final).href; best = score; } } catch {}
+      }
+    } else void res.body?.cancel().catch(() => {});
+    let icon: string | undefined;
+    try {
+      if (/^https?:/.test(iconUrl)) {
+        const got = await get(iconUrl, 'image/*');
+        const kind = (got.headers.get('content-type') ?? '').split(';')[0].trim();
+        if (got.ok && /^image\/(png|x-icon|vnd\.microsoft\.icon|gif|jpeg|webp|svg\+xml|avif)$/.test(kind)) {
+          const bytes = await readCapped(got, 256 * 1024);
+          if (bytes.length) icon = `data:${kind};base64,${Buffer.from(bytes).toString('base64')}`;
+        } else void got.body?.cancel().catch(() => {});
+      }
+    } catch {}
+    return { title, icon };
+  })().catch(() => ({}));
+  previews.set(key, job);
+  // Nothing found (offline, a slow site): ask again next time rather than remember the failure.
+  void job.then((r: { title?: string; icon?: string }) => { if (!r.title && !r.icon && previews.get(key) === job) previews.delete(key); });
+  if (previews.size > 300) previews.delete(previews.keys().next().value!);
+  return job;
+}
+
 function registerIpc() {
   const ipcMain = guarded; // every handler below goes through the check above
   ipcMain.handle('pty:spawn', (e, id: string, opts) => spawnSession(e.sender, id, opts));
@@ -1052,6 +1136,7 @@ function registerIpc() {
     const res = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
     return (['save', 'discard', 'cancel'] as const)[res.response] ?? 'cancel';
   });
+  ipcMain.handle('link:preview', (_e, address: unknown) => (typeof address === 'string' && address.length < 4096 ? linkPreview(address) : {}));
   ipcMain.handle('app:checkUpdate', () => checkUpdate());
   ipcMain.handle('app:installUpdate', (e, running: number) => installUpdate(BrowserWindow.fromWebContents(e.sender), Number(running) || 0));
   ipcMain.handle('app:takeHandoff', (e) => handoffs.get(e.sender.id) ?? null);

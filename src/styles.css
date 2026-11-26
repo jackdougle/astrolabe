@@ -699,6 +699,12 @@ html[data-theme="light"] .rich-title { color: color-mix(in srgb, color-mix(in sr
 .link-box .link-go span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; }
 .link-box .link-go svg { flex: none; opacity: 0.7; }
 .link-box :is(.link-edit, .link-remove) { width: 24px; justify-content: center; }
+.link-box:has(.link-row) { flex-direction: column; align-items: stretch; gap: 1px; }
+.link-box .link-row { display: flex; align-items: center; gap: 2px; min-width: 0; }
+.link-box .link-head { height: auto; min-height: 26px; padding: 3px 7px 2px; gap: 8px; color: var(--text); font: 500 12.5px/1.35 var(--notes, -apple-system, BlinkMacSystemFont, sans-serif); text-align: left; }
+.link-box .link-head[hidden] { display: none; }
+.link-box .link-head img { flex: none; width: 16px; height: 16px; border-radius: 3px; object-fit: contain; }
+.link-box .link-head span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .link-box .link-input { width: 340px; max-width: calc(100vw - 30px); height: 22px; padding: 0 7px; background: none; border: 0; outline: 0; color: var(--text); font: inherit; user-select: text; }
 .link-box .link-input::placeholder { color: var(--faint); }
 .link-box.is-editing { border-color: color-mix(in srgb, var(--accent) 60%, var(--line)); }
