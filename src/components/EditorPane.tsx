@@ -16,6 +16,7 @@ import { mountRich, RichHandle } from '../lib/richMarkdown';
 import { EditorPane as EditorPaneState, focusedId, isMarkdown, projectRoot, scrollSpeed, useStore } from '../lib/store';
 import { FindBar } from './FindBar';
 import { GraphView } from './GraphView';
+import { Icon } from './Icons';
 
 const LIST_ITEM = /^(\s*)([-*+]|\d+[.)])(\s+)(\[[ xX]\]\s+)?/;
 
@@ -390,7 +391,7 @@ export function EditorPane({ pane, active }: { pane: EditorPaneState; active: bo
 }
 
 /** Shown at the foot of a file while changes made to it from outside are waiting to be looked at (review.ts): how
- *  many, arrows to go from one to the next, and Keep all / Undo all. Each change has its own Keep and Undo beside it. */
+ *  many, chevrons to go from one to the next, and Keep all / Undo all. Each change has its own Keep and Undo beside it. */
 function ChangesBar({ pane, editor, rich, rendered, loaded }: { pane: string; editor: React.RefObject<monaco.editor.IStandaloneCodeEditor | null>; rich: React.RefObject<HTMLDivElement | null>; rendered: boolean; loaded: number }) {
   useSyncExternalStore(onChanges, reviewVersion);
   const at = useRef(-1);
@@ -409,7 +410,7 @@ function ChangesBar({ pane, editor, rich, rendered, loaded }: { pane: string; ed
     if (!rendered) { revealNext(ed, back); ed.focus(); return; }
     const boxes = [...(rich.current?.querySelectorAll<HTMLElement>('.rv-box') ?? [])];
     if (!boxes.length) return;
-    at.current = (at.current + (back ? -1 : 1) + boxes.length * 2) % boxes.length;
+    at.current = at.current < 0 ? (back ? boxes.length - 1 : 0) : (at.current + (back ? -1 : 1) + boxes.length) % boxes.length;
     boxes[at.current].scrollIntoView({ block: 'center', behavior: 'smooth' });
   };
   if (!model || !list.length) return null;
@@ -419,8 +420,8 @@ function ChangesBar({ pane, editor, rich, rendered, loaded }: { pane: string; ed
   return (
     <div className="changes-bar" role="toolbar" aria-label="Changes made outside the editor">
       <span className="changes-n">{label}</span>
-      <button className="changes-step" title="Previous change" onClick={() => go(true)}>↑</button>
-      <button className="changes-step" title="Next change" onClick={() => go(false)}>↓</button>
+      <button className="changes-step" aria-label="Previous change" title="Previous change" onClick={() => go(true)}><Icon name="left" size={12} /></button>
+      <button className="changes-step" aria-label="Next change" title="Next change" onClick={() => go(false)}><Icon name="right" size={12} /></button>
       <button className="rv-keep" title="Keep all (⌘K)" onClick={() => keepChanges(model)}>Keep all</button>
       <button className="rv-undo" title="Undo all (⌥⌘N)" onClick={() => undoChanges(model)}>Undo all</button>
     </div>

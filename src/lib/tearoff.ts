@@ -70,7 +70,7 @@ async function pack(t: Torn & { /** It is going to another window, not to one of
       if (snap) out[`term:${id}`] = snap;
     }
     // Once this answer is on its way the shells answer to the new window (main.ts), so the terminals closing here end nothing.
-    window.setTimeout(() => useStore.getState().closeTab(tab.id), 0);
+    window.setTimeout(() => useStore.getState().closeTab(tab.id, false), 0);
     return out;
   }
   const from = s.panes[t.pane];

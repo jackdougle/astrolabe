@@ -90,6 +90,16 @@ export const filesLoaded = () => Promise.allSettled([...loading.values()]);
 
 export function fileEntry(path: string) { return files.get(path); }
 
+/** A tab may be reopened before its model is released. Leave only the disk version after Discard. */
+export function discardFileEdits(path: string) {
+  const entry = files.get(path);
+  if (entry && !entry.model.isDisposed()) {
+    entry.model.setValue(entry.disk);
+    entry.savedVersion = entry.model.getAlternativeVersionId();
+  }
+  useStore.getState().setDirty(path, false);
+}
+
 export function loadFile(path: string): Promise<FileEntry | { error: string }> {
   const existing = files.get(path);
   if (existing && !existing.model.isDisposed()) return Promise.resolve(existing);

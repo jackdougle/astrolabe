@@ -32,6 +32,7 @@ The window has two areas side by side, the terminals and the editors, and they d
 - A file opens in a temporary tab with its name in italics, and the next file you open takes its place. Saving it or double-clicking it keeps the tab.
 - Tabs drag anywhere. Along the row a tab changes places. Carried down among the panes, a terminal's segment or a file's tab shows an outline of where it would land: over another pane, the half of it on the pointer's side; close to a wall, that whole side; over the other area (a terminal over the editors, a file over the terminals), that side of the window, so the terminals can sit beside, above or below the editors. Out of the window, a tab gets a window of its own. The short bar at a pane's top edge drags the same way. Shells keep running through all of this.
 - Right-click the top row, clear of the tabs, for something new in the area under the pointer: over the terminals a terminal (in a tab of its own, on the right, or below), over an editor a note or another editor.
+- Right-click another file's tab or terminal tab and choose Split view to put it beside the one you're using, in header order. Each terminal tab takes half the space with its own splits and shells intact. When you rearrange panes, their headers follow. A pane above another gets the earlier header.
 - A code file's tab shows its language's logo; notes show a page. Either turns neon while the file has unsaved changes.
 - An untitled note with nothing in it is deleted once it is out of sight: when its editor shows another file, or when the terminals take the whole window.
 - Terminal tabs combine. Drop a tab on the middle of another and its terminals join that tab, or right-click a tab and choose Combine with Current Tab. Right-click a terminal's segment for Move Terminal to Its Own Tab, or carry the terminal by its bar up to the row: onto a tab to join it, beside the tabs for a tab of its own.
@@ -54,6 +55,8 @@ The keyboard button at the bottom of the navigator lists every hotkey, and you c
 |---|---|
 | ⌘T, ⌘D, ⇧⌘D | New terminal tab, split right, split down |
 | ⌘W, ⇧⌘W | Close the terminal or file you're in, close the whole tab |
+| ⇧⌘T | Reopen the last closed tab in the focused area. Terminals restart in their previous folders. |
+| ⌘←, ⌘→ | Go back or forward after a link takes over a temporary file tab |
 | ⌘U, ⇧⌘U | Hide this terminal, bring the hidden ones back (again: hide them again) |
 | ⌘1–9, ⌥⌘1–9 | Go to a terminal tab, go to an open file |
 | ⌥⌘arrows, ⌃` | Move between panes, jump between the editors and the terminals |
@@ -90,7 +93,7 @@ Markdown opens rendered, and ⇧⌘R switches to raw. Both views edit the same t
 
 ### When an agent edits a file you have open
 
-The change goes straight into the text you're looking at, and you keep typing. Each change is marked until you've looked at it: added lines are green, the lines they replaced are red above them, and each has its own Keep and Undo. A bar at the bottom counts them and has Keep all (⌘K) and Undo all (⌥⌘N). It works rendered and raw, for notes and code.
+The change goes straight into the text you're looking at, and you keep typing. Each change is marked until you've looked at it: added lines are green, the lines they replaced are red above them, and each has its own Keep and Undo. A bar at the bottom counts them, has left and right chevrons to step through them, and has Keep all (⌘K) and Undo all (⌥⌘N). It works rendered and raw, for notes and code.
 
 Unsaved typing is never lost. The outside change is merged around it, and saving writes both. If the change lands on lines you've edited but not saved, your lines stay and the other version is shown under them with "Use this" and "Keep mine". Undo puts the old lines back and, if nothing else is unsaved, saves the file so the agent sees it too.
 

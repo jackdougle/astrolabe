@@ -59,7 +59,7 @@ const api = {
     createFile: (dir: string, name: string) => ipcRenderer.invoke('fs:createFile', dir, name) as Promise<{ path?: string; error?: string }>,
     discardBlank: (file: string, text: string) => ipcRenderer.invoke('fs:discardBlank', file, text) as Promise<boolean>,
     treeMenu: (on: 'file' | 'dir' | 'blank', count?: number) => ipcRenderer.invoke('tree:menu', on, count) as Promise<'newFile' | 'rename' | 'trash' | 'reveal' | null>,
-    headerMenu: () => ipcRenderer.invoke('editor:menu') as Promise<'newFile' | null>,
+    headerMenu: (opts: { split: boolean }) => ipcRenderer.invoke('editor:menu', opts) as Promise<'newFile' | 'split' | null>,
     watch: (paths: string[]) => ipcRenderer.send('fs:watch', paths),
     onFileChanged: (fn: (path: string) => void) => on('fs:fileChanged', fn),
     testMenuChoice: (choice: string) => ipcRenderer.send('test:menuChoice', choice),
@@ -128,7 +128,7 @@ const api = {
     },
     /** The right-click menu of a terminal tab. `join`: it can be combined with the tab in front; `part`: the
      *  terminal clicked can leave for a tab of its own. */
-    tabMenu: (opts: { join: boolean; part: boolean }) => ipcRenderer.invoke('tab:menu', opts) as Promise<'join' | 'part' | 'close' | null>,
+    tabMenu: (opts: { join: boolean; split: boolean; part: boolean }) => ipcRenderer.invoke('tab:menu', opts) as Promise<'join' | 'split' | 'part' | 'close' | null>,
     /** A right-click menu the page describes: rows with an id and a label, `null` for a line between them. Gives the
      *  id of the row chosen. */
     menu: (items: ({ id: string; label: string; enabled?: boolean } | null)[]) => ipcRenderer.invoke('app:menu', items) as Promise<string | null>,

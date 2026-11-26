@@ -2,11 +2,11 @@ import * as monaco from 'monaco-editor';
 import { api, appInfo, basename, dirname, joinPath } from './api';
 import { GRAPH, graphRoot, isGraph } from './graph';
 import { leaves } from './layout';
-import { fileEntry, moveFiles, releaseFile, saveFile } from './monaco';
+import { discardFileEdits, fileEntry, moveFiles, releaseFile, saveFile } from './monaco';
 import { carried, carry } from './handoff';
 import { waiting } from './review';
 import { bus, focusPane } from './panes';
-import { activePane, activeTab, focusedId, hiddenTerms, isMarkdown, liveEditors, openFiles, projectRoot, showing, tabGroups, useStore } from './store';
+import { activePane, activeTab, focusedId, hiddenTerms, isMarkdown, linkStep, liveEditors, openFiles, projectRoot, showing, tabGroups, useStore } from './store';
 import { getSession } from './termSession';
 import { getTheme, THEMES } from './themes';
 
@@ -272,9 +272,9 @@ export async function closeFileTab(paneId: string, path: string) {
     if (choice === 'cancel') { refocus(); return; }
     if (choice === 'save' && !(await saveFile(path))) return;
     // Thrown-away typing no longer counts, so a ⌘N note closed this way is cleared like one never typed in.
-    if (choice === 'discard') S().setDirty(path, false);
+    if (choice === 'discard') discardFileEdits(path);
   }
-  S().closeFile(paneId, path);
+  S().closeFile(paneId, path, true);
   releaseFile(path);
   refocus();
   if (!isOpen(path)) void fileClosed(path);
@@ -357,7 +357,8 @@ export const commands: Command[] = [
     S().openFile(res.path, { line: 1, end: true, blank: res.text }, { keep: true });
     bus.emit('fs.changed');
   } },
-  { id: 'tab.new', title: 'New terminal tab', keys: ['cmd+t', 'cmd+shift+t'], run: () => { S().newTab(); refocus(); } },
+  { id: 'tab.new', title: 'New terminal tab', keys: ['cmd+t'], run: () => { S().newTab(); refocus(); } },
+  { id: 'tab.reopen', title: 'Reopen the last closed tab in this area', keys: ['cmd+shift+t'], run: async () => { await S().reopenClosedTab(); refocus(); } },
   { id: 'tab.close', title: 'Close tab (this file, or this tab with all its terminals)', keys: ['cmd+shift+w'], run: () => {
     const e = editor();
     if (e?.active) closeFileTab(e.id, e.active);
@@ -395,6 +396,14 @@ export const commands: Command[] = [
   // ⌘\ is VS Code's key for this. ⌘D and ⇧⌘D always make terminals.
   { id: 'editor.splitRight', title: 'Split the editor: this file again in a second editor on the right', keys: ['cmd+\\'], when: () => !!editor()?.active, run: () => { S().splitEditor('right'); refocus(); } },
   { id: 'editor.splitDown', title: 'Split the editor: this file again in a second editor below', keys: ['cmd+shift+\\'], when: () => !!editor()?.active, run: () => { S().splitEditor('bottom'); refocus(); } },
+  ...([-1, 1] as const).map((delta): Command => ({
+    id: delta < 0 ? 'editor.back' : 'editor.forward',
+    title: delta < 0 ? 'Go back after following a file link' : 'Go forward to the linked file',
+    keys: [delta < 0 ? 'cmd+arrowleft' : 'cmd+arrowright'],
+    when: () => { const pane = editor(); return !!pane && !!linkStep(pane, delta); },
+    keyWhen: { [delta < 0 ? 'cmd+arrowleft' : 'cmd+arrowright']: () => inRaw() || !document.activeElement?.matches('input, textarea, .rich-title') },
+    run: () => { S().stepLink(delta); refocus(); },
+  })),
   // Obsidian's key for its graph.
   { id: 'graph.open', title: 'Graph: show the notes of this project as a network', keys: ['cmd+g'], run: () => { S().openFile(GRAPH + projectRoot()); refocus(); } },
   { id: 'pane.switchEditor', title: 'Switch between the editor and the terminal', keys: ['ctrl+`'], when: bothAreas, run: switchEditorTerminal },

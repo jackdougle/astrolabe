@@ -24,6 +24,19 @@ export function computeLayout(node: LayoutNode, rect: Rect = { x: 0, y: 0, w: 10
   return { panes, dividers };
 }
 
+/** Each topmost editor starts a stretch of the header. Tabs below it follow in top-to-bottom order. */
+export function editorHeaderColumns(root: LayoutNode) {
+  const { panes } = computeLayout(root);
+  const columns = panes.filter(({ rect }) => rect.y === 0).sort((a, b) => a.rect.x - b.rect.x)
+    .map(({ pane, rect }) => ({ pane, x: rect.x, w: rect.w, editors: [pane] }));
+  const below = panes.filter(({ rect }) => rect.y > 0).sort((a, b) => a.rect.y - b.rect.y || a.rect.x - b.rect.x);
+  for (const { pane, rect } of below) {
+    const mid = rect.x + rect.w / 2;
+    (columns.find((col) => mid >= col.x && mid < col.x + col.w) ?? columns.at(-1))?.editors.push(pane);
+  }
+  return columns;
+}
+
 export function leaves(node: LayoutNode, out: string[] = []): string[] {
   if (node.type === 'leaf') out.push(node.pane); else { leaves(node.a, out); leaves(node.b, out); }
   return out;

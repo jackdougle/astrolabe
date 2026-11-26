@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { api, appInfo, basename, tildify } from './api';
 import { carried, carry, hasCarried } from './handoff';
-import { addLeaf, addNode, Edge, keepLeaves, LayoutNode, leaves, moveLeaf, opposite, removeLeaf, replaceLeaf, setRatio } from './layout';
+import { addLeaf, addNode, Edge, editorHeaderColumns, keepLeaves, LayoutNode, leaves, moveLeaf, opposite, removeLeaf, replaceLeaf, setRatio } from './layout';
 import { exitDelay } from './motion';
 import { bus, markMoving } from './panes';
 import { applyTheme, getTheme } from './themes';
@@ -29,6 +29,8 @@ export interface OpenFile {
 export interface EditorPane {
   id: string; kind: 'editor';
   files: OpenFile[]; active: string | null;
+  /** The trail of links that took over this pane's temporary tab. */
+  trail?: { files: OpenFile[]; at: number };
   /** `end`: put the caret on a fresh line at the end of the note (rendered notes stay rendered). */
   reveal: { path: string; line: number; col: number; n: number; end?: boolean } | null;
 }
@@ -143,8 +145,9 @@ interface State {
   init(): Promise<void>;
   /** `stay` leaves the keyboard where it is and shows both areas. */
   newTab(cwd?: string, opts?: { stay?: boolean }): string;
-  closeTab(id: string): void;
+  closeTab(id: string, remember?: boolean): void;
   closePane(id: string): void;
+  reopenClosedTab(): Promise<void>;
   /** Takes a terminal off screen and leaves it running: the one given, or the one used last in the tab in front. */
   hideTerm(id?: string): void;
   /** Brings a hidden terminal back to its place in its tab, with the keyboard. */
@@ -189,6 +192,8 @@ interface State {
   /** Takes a file out of its editor and puts it in the editor `target` ('into'), or in an editor of its own against
    *  one edge of the editor `target` (of the whole editor area when `target` is null). */
   placeFile(paneId: string, path: string, target: string | null, where: Edge | 'into'): void;
+  /** Shows this file beside the focused file, following their order in the header. */
+  splitFileView(paneId: string, path: string): void;
   /** Shows the file you are in a second time, in a new editor against one edge of this one. */
   splitEditor(edge: Edge): void;
   /** A new editor with no file in it yet, against that edge of the editor `beside` (or of the one used last). With no
@@ -200,10 +205,11 @@ interface State {
   commandFinished(paneId: string, exit: number): void;
   /** Opens a file in the editor used last (the first file opens the editor area). `beside` opens it in a new editor
    *  against that edge of the editor used last instead. `stay` leaves the keyboard where it is. */
-  openFile(path: string, pos?: { line: number; col?: number; end?: boolean; blank?: string } | null, opts?: { blank?: string; stay?: boolean; beside?: Edge; keep?: boolean }): void;
+  openFile(path: string, pos?: { line: number; col?: number; end?: boolean; blank?: string } | null, opts?: { blank?: string; stay?: boolean; beside?: Edge; keep?: boolean; fromLink?: boolean; paneId?: string; rendered?: boolean }): void;
+  stepLink(delta: -1 | 1): void;
   /** Makes a temporary tab one that stays: in one editor, or wherever the file is open. */
   keepFile(path: string, paneId?: string): void;
-  closeFile(paneId: string, path: string): void;
+  closeFile(paneId: string, path: string, remember?: boolean): void;
   activateFile(paneId: string, path: string): void;
   toggleRendered(paneId: string, path: string): void;
   setDirty(path: string, dirty: boolean): void;
@@ -219,6 +225,14 @@ interface State {
 
 /** The terminals ⇧⌘U last brought back, and when each had been hidden: pressed again, it hides them again. */
 let broughtBack: { id: string; at: number }[] = [];
+
+const closedTermTabs: { root: LayoutNode; activePane: string; dirs: Record<string, string>; index: number; maximized: boolean }[] = [];
+const closedFileTabs: { paneId: string; file: OpenFile }[] = [];
+let reopeningFile = false;
+function rememberClosed<T>(stack: T[], tab: T) {
+  stack.push(tab);
+  if (stack.length > 50) stack.shift();
+}
 
 let seq = 0;
 export const uid = (p: string) => `${p}${Date.now().toString(36)}${(seq++).toString(36)}`;
@@ -329,7 +343,7 @@ export const useStore = create<State>((set, get) => ({
   },
 
   // Closing is two steps: focus moves on at once and the closed thing fades out, then it is removed.
-  closeTab(id) {
+  closeTab(id, remember = true) {
     const s = get();
     const tab = s.tabs.find((t) => t.id === id);
     if (!tab || s.leaving[id]) return;
@@ -337,6 +351,15 @@ export const useStore = create<State>((set, get) => ({
     const hid = all.filter((p) => isHidden(s.panes[p]));
     // A tab with every terminal hidden is not on screen, so it simply goes.
     if (hid.length === all.length) { removeTab(id); return; }
+    if (remember) {
+      const ids = shownTerms(s, tab);
+      const root = keepLeaves(tab.root, (pane) => ids.includes(pane));
+      if (root) rememberClosed(closedTermTabs, {
+        root, activePane: ids.includes(tab.activePane) ? tab.activePane : ids[0],
+        dirs: Object.fromEntries(ids.map((pane) => [pane, (s.panes[pane] as TermPane).cwd])),
+        index: tabGroups(s).indexOf(tab), maximized: tab.maximized,
+      });
+    }
     // Terminals hidden in this tab stay hidden, and running: only the ones on show close.
     const finish = hid.length ? () => removeShown(id, all.filter((p) => !hid.includes(p))) : () => removeTab(id);
     const remaining = tabGroups(s).filter((t) => t.id !== id);
@@ -380,6 +403,48 @@ export const useStore = create<State>((set, get) => ({
     const next = tab.activePane === id ? rest[Math.min(order.indexOf(id), rest.length - 1)] : tab.activePane;
     set({ tabs: s.tabs.map((t) => (t.id === tab.id ? { ...t, activePane: next, maximized: false } : t)) });
     fadeOut(id, true, () => removePane(id));
+  },
+
+  async reopenClosedTab() {
+    const s = get();
+    // The keyboard can move to the other area when its last tab closes. Keep that tab reachable.
+    let area = s.focus;
+    if (area === 'editor' && !closedFileTabs.length && !tabGroups(s).length) area = 'terminal';
+    else if (area === 'terminal' && !closedTermTabs.length && !liveEditors(s).length) area = 'editor';
+    if (area === 'editor') {
+      if (reopeningFile) return;
+      reopeningFile = true;
+      try {
+        while (closedFileTabs.length) {
+          const { paneId, file } = closedFileTabs.pop()!;
+          if (!file.path.startsWith('graph:')) {
+            const stat = await api.fs.stat(file.path);
+            if (!stat.exists || stat.dir) continue;
+          }
+          get().openFile(file.path, null, { paneId, keep: true, rendered: file.rendered, blank: file.blank });
+          return;
+        }
+      } finally { reopeningFile = false; }
+      return;
+    }
+    const closed = closedTermTabs.pop();
+    if (!closed) return;
+    // Closing a terminal ends its shell. Restore the splits and directories with fresh shells.
+    const panes = { ...s.panes };
+    let activePane = '';
+    const restore = (node: LayoutNode): LayoutNode => {
+      if (node.type === 'split') return { ...node, id: uid('s'), a: restore(node.a), b: restore(node.b) };
+      const pane = makeTerm(closed.dirs[node.pane]);
+      panes[pane.id] = pane;
+      if (node.pane === closed.activePane) activePane = pane.id;
+      return { type: 'leaf', pane: pane.id };
+    };
+    const root = restore(closed.root);
+    const tab: Tab = { id: uid('tab'), root, activePane, maximized: closed.maximized };
+    const group = tabGroups(s)[closed.index];
+    const tabs = [...s.tabs];
+    tabs.splice(group ? tabs.indexOf(group) : tabs.length, 0, tab);
+    set({ panes, tabs, activeTab: tab.id, focus: 'terminal' });
   },
 
   hideTerm(id) {
@@ -674,6 +739,21 @@ export const useStore = create<State>((set, get) => ({
     set({ panes: { ...s.panes, [paneId]: left, [pane.id]: pane }, focus: 'editor', editors: { root: addLeaf(tree, pane.id, target, where, uid('s')), active: pane.id, maximized: false } });
   },
 
+  splitFileView(paneId, path) {
+    const s = get();
+    const side = fileSplitSide(s, paneId, path);
+    if (!side) return;
+    const active = s.editors.active;
+    if (paneId === active) get().placeFile(paneId, path, active, side);
+    else {
+      // A file in another editor already has a pane: bring it forward there and move that pane beside this one.
+      get().activateFile(paneId, path);
+      get().movePane(paneId, active, side);
+      if (get().editors.maximized) set({ editors: { ...get().editors, maximized: false } });
+    }
+    get().focusPane(active);
+  },
+
   splitEditor(edge) {
     const s = get();
     const from = s.editors.root ? s.panes[s.editors.active] : null;
@@ -713,12 +793,12 @@ export const useStore = create<State>((set, get) => ({
   openFile(path, pos, opts) {
     const s = get();
     const reveal = pos ? { path, line: pos.line, col: pos.col ?? 1, n: Date.now(), end: pos.end } : null;
-    const rendered = isMarkdown(path) && (!pos || !!pos.end);
+    const rendered = opts?.rendered ?? (isMarkdown(path) && (!pos || !!pos.end));
     const blank = opts?.blank ?? pos?.blank;
     // A file opened to look at gets a temporary tab. One made here (a new note), the graph, and one asked to be kept, stay.
     const temp = s.settings.previewTabs && !opts?.keep && blank === undefined && !path.startsWith('graph:');
     const live = liveEditors(s);
-    const last = live.find((e) => e.id === s.editors.active) ?? live[0] ?? null;
+    const last = live.find((e) => e.id === opts?.paneId) ?? live.find((e) => e.id === s.editors.active) ?? live[0] ?? null;
     const focus = opts?.stay && s.tabs.length ? s.focus : 'editor';
     // Opened from the terminals while they fill the window, a file shows beside them; opened from the editors, it stays as it was.
     const areas = { ...s.areas, full: s.areas.full && s.focus === 'editor' };
@@ -732,7 +812,13 @@ export const useStore = create<State>((set, get) => ({
       const old = !has && temp ? last.files.find((f) => f.temp && !s.dirty[f.path] && !s.leaving[fileKey(last.id, f.path)]) : undefined;
       const files = has ? (opts?.keep ? last.files.map((f) => (f.path === path && f.temp ? { ...f, temp: undefined } : f)) : last.files)
         : old ? last.files.map((f) => (f === old ? next : f)) : [...last.files, next];
-      set({ panes: { ...s.panes, [last.id]: { ...last, files, active: path, reveal } }, focus, areas, editors: { ...s.editors, active: last.id } });
+      let trail = last.trail;
+      if (old && old.path === last.active && opts?.fromLink) {
+        const past = trail?.files[trail.at].path === old.path ? trail.files.slice(0, trail.at) : [];
+        const history = [...past, old, next].slice(-50);
+        trail = { files: history, at: history.length - 1 };
+      } else if (old) trail = undefined;
+      set({ panes: { ...s.panes, [last.id]: { ...last, files, active: path, reveal, trail } }, focus, areas, editors: { ...s.editors, active: last.id } });
       if (old) bus.emit('file.closed', old.path); // its buffer is let go (monaco.ts)
       return;
     }
@@ -742,13 +828,33 @@ export const useStore = create<State>((set, get) => ({
     set({ panes: { ...s.panes, [pane.id]: pane }, focus, areas, editors: { root, active: pane.id, maximized: false } });
   },
 
-  closeFile(paneId, path) {
+  stepLink(delta) {
+    const s = get();
+    const pane = activePane(s);
+    if (pane?.kind !== 'editor') return;
+    const trail = pane.trail;
+    const target = linkStep(pane, delta);
+    if (!trail || !target) return;
+    const old = pane.files.find((f) => f.path === pane.active);
+    const key = fileKey(pane.id, target.path);
+    const { [key]: fading, ...leaving } = s.leaving;
+    const has = pane.files.some((f) => f.path === target.path);
+    const replace = !has && old?.temp && !s.dirty[old.path];
+    // If the current file was pinned or edited after following the link, leave its tab alone.
+    const files = has ? pane.files : replace ? pane.files.map((f) => f === old ? target : f) : [...pane.files, { ...target, temp: pane.files.some((f) => f.temp) ? undefined : target.temp }];
+    const history = trail.files.map((f, i) => i === trail.at && old ? old : f);
+    set({ panes: { ...s.panes, [pane.id]: { ...pane, files, active: target.path, reveal: null, trail: { files: history, at: trail.at + delta } } }, leaving: fading ? leaving : s.leaving });
+    if (replace) bus.emit('file.closed', old.path);
+  },
+
+  closeFile(paneId, path, remember = false) {
     const p = get().panes[paneId];
     const key = fileKey(paneId, path);
     if (!p || p.kind !== 'editor' || get().leaving[key] || get().leaving[paneId]) return;
     const live = p.files.filter((f) => f.path === path || !get().leaving[fileKey(paneId, f.path)]);
     const idx = live.findIndex((f) => f.path === path);
     if (idx < 0) return;
+    if (remember) rememberClosed(closedFileTabs, { paneId, file: live[idx] });
     const files = live.filter((f) => f.path !== path);
     if (!files.length) {
       // Closing the last file when nothing else is open leaves you at an empty terminal, not a closed app.
@@ -794,9 +900,11 @@ export const useStore = create<State>((set, get) => ({
     const s = get();
     const move = (p: string) => (p === from || p.startsWith(from + '/') ? to + p.slice(from.length) : p);
     const panes: Record<string, Pane> = {};
+    const rename = (f: OpenFile) => ({ ...f, path: move(f.path), blank: f.path === from ? undefined : f.blank });
+    for (const entry of closedFileTabs) entry.file = rename(entry.file);
     for (const p of Object.values(s.panes)) {
       // A ⌘N note that is given a name of its own is no longer a blank one to clear away.
-      panes[p.id] = p.kind === 'editor' ? { ...p, files: p.files.map((f) => ({ ...f, path: move(f.path), blank: f.path === from ? undefined : f.blank })), active: p.active ? move(p.active) : null, reveal: null } : p;
+      panes[p.id] = p.kind === 'editor' ? { ...p, files: p.files.map(rename), active: p.active ? move(p.active) : null, reveal: null, trail: p.trail && { ...p.trail, files: p.trail.files.map(rename) } } : p;
     }
     set({ panes, dirty: Object.fromEntries(Object.entries(s.dirty).map(([k, v]) => [move(k), v])) });
   },
@@ -845,7 +953,22 @@ function frontAfter(s: Pick<State, 'tabs' | 'panes' | 'leaving' | 'activeTab' | 
 }
 /** Every open file, in the order their tabs sit in the row. ⌥⌘1–9 count these. */
 export function openFiles(s: Pick<State, 'panes' | 'editors' | 'leaving'>): { pane: string; path: string }[] {
-  return liveEditors(s).flatMap((e) => e.files.filter((f) => !s.leaving[fileKey(e.id, f.path)]).map((f) => ({ pane: e.id, path: f.path })));
+  const root = s.editors.root && keepLeaves(s.editors.root, (id) => !s.leaving[id]);
+  if (!root) return [];
+  return editorHeaderColumns(root).flatMap((col) => col.editors.flatMap((id) => {
+    const p = s.panes[id];
+    return p?.kind === 'editor' ? p.files.filter((f) => !s.leaving[fileKey(id, f.path)]).map((f) => ({ pane: id, path: f.path })) : [];
+  }));
+}
+
+export function fileSplitSide(s: State, paneId: string, path: string): 'left' | 'right' | null {
+  if (s.focus !== 'editor' || path.startsWith('graph:')) return null;
+  const active = s.panes[s.editors.active];
+  if (active?.kind !== 'editor' || !active.active || active.active === path || active.active.startsWith('graph:')) return null;
+  const files = openFiles(s);
+  const a = files.findIndex((f) => f.pane === active.id && f.path === active.active);
+  const b = files.findIndex((f) => f.pane === paneId && f.path === path);
+  return a < 0 || b < 0 ? null : b < a ? 'left' : 'right';
 }
 /** What the window has on screen: both areas side by side, or one of them filling it. */
 export function showing(s: Pick<State, 'tabs' | 'panes' | 'editors' | 'leaving' | 'focus' | 'areas'>): 'both' | 'terminal' | 'editor' {
@@ -1024,6 +1147,10 @@ export function activeTab(s: State = useStore.getState()) { return s.tabs.find((
 export function activePane(s: State = useStore.getState()): Pane | null {
   const id = focusedId(s);
   return id ? s.panes[id] ?? null : null;
+}
+export function linkStep(pane: EditorPane, delta: -1 | 1) {
+  const trail = pane.trail;
+  if (trail && trail.files[trail.at]?.path === pane.active) return trail.files[trail.at + delta];
 }
 /** The terminal that file and search panels follow: the one used last in the tab in front. */
 export function activeTermPane(s: State = useStore.getState()): TermPane | null {

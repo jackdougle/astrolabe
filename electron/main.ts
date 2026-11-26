@@ -1030,10 +1030,13 @@ function registerIpc() {
     menu.popup({ window: win ?? undefined, callback: () => setTimeout(() => resolve(null), 50) });
   }));
   // Right-clicking the strip of file tabs above the editor.
-  ipcMain.handle('editor:menu', (e) => new Promise<string | null>((resolve) => {
+  ipcMain.handle('editor:menu', (e, opts: { split?: boolean }) => new Promise<string | null>((resolve) => {
     if (process.env.ASTROLABE_TEST) { resolve(testMenuChoice); testMenuChoice = null; return; }
     const win = BrowserWindow.fromWebContents(e.sender);
-    const menu = Menu.buildFromTemplate([{ label: 'New File', click: () => resolve('newFile') }]);
+    const menu = Menu.buildFromTemplate([
+      { label: 'Split view', enabled: !!opts?.split, click: () => resolve('split') },
+      { label: 'New File', click: () => resolve('newFile') },
+    ]);
     menu.popup({ window: win ?? undefined, callback: () => setTimeout(() => resolve(null), 50) });
   }));
   ipcMain.on('fs:watch', (e, paths: string[]) => watchFiles(e.sender, Array.isArray(paths) ? paths : []));
@@ -1170,10 +1173,11 @@ function registerIpc() {
     else dropGhost(page);
   });
   // Right-clicking a terminal tab.
-  ipcMain.handle('tab:menu', (e, opts: { join?: boolean; part?: boolean }) => new Promise<string | null>((resolve) => {
+  ipcMain.handle('tab:menu', (e, opts: { join?: boolean; split?: boolean; part?: boolean }) => new Promise<string | null>((resolve) => {
     if (process.env.ASTROLABE_TEST) { resolve(testMenuChoice); testMenuChoice = null; return; }
     const win = BrowserWindow.fromWebContents(e.sender);
     const menu = Menu.buildFromTemplate([
+      { label: 'Split view', enabled: !!opts?.split, click: () => resolve('split') },
       { label: 'Combine with Current Tab', enabled: !!opts?.join, click: () => resolve('join') },
       { label: 'Move Terminal to Its Own Tab', enabled: !!opts?.part, click: () => resolve('part') },
       { type: 'separator' as const },

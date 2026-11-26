@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalS
 import { flushSync } from 'react-dom';
 import { api, basename, tildify } from '../lib/api';
 import { attachPaths, closeFileTab, handleShortcut, newFileBeside, pathsOf, pickAndAttach, runCommand, shortcutLabel, updateApp } from '../lib/commands';
-import { areaRects, computeLayout, DividerRect, findSplit, keepLeaves, leafShares, LayoutNode, leaves } from '../lib/layout';
+import { areaRects, computeLayout, DividerRect, editorHeaderColumns, findSplit, keepLeaves, leafShares, LayoutNode, leaves } from '../lib/layout';
 import { carry, docking } from '../lib/dock';
 import { graphRoot, isGraph } from '../lib/graph';
 import { fileIconName } from '../lib/fileIcons';
@@ -11,7 +11,7 @@ import { fileEntry, monoFont, refreshFiles, setMonacoTheme } from '../lib/monaco
 import { subscribe as onChanges, waiting } from '../lib/review';
 import { richHooks } from '../lib/richMarkdown';
 import { bus, focusPane, paneHandles } from '../lib/panes';
-import { EditorPane as EditorPaneState, EDITORS, fileKey, focusedId, hiddenTerms, isMarkdown, liveEditors, openFiles, Pane, scrollSpeed, showing, shownTerms, Tab, tabGroups, TermPane, termLabel, useStore } from '../lib/store';
+import { EditorPane as EditorPaneState, EDITORS, fileKey, fileSplitSide, focusedId, hiddenTerms, isMarkdown, liveEditors, openFiles, Pane, scrollSpeed, showing, shownTerms, Tab, tabGroups, TermPane, termLabel, useStore } from '../lib/store';
 import { allSessions, getSession } from '../lib/termSession';
 import { Landing, landing, onBlock, Over } from '../lib/movein';
 import { canTear, TEAR_EDGE, tearSpec, Torn } from '../lib/tearoff';
@@ -186,15 +186,9 @@ function TabStrip() {
   if (live.length && editors.root) {
     // One stretch for each editor along the top of the editor area; an editor below another shares the stretch above it.
     const shown = editors.maximized ? null : keepLeaves(editors.root, (id) => !leaving[id]);
-    const rects = shown ? computeLayout(shown).panes : [{ pane: editors.active, rect: { x: 0, y: 0, w: 100, h: 100 } }];
+    const cols = editorHeaderColumns(shown ?? { type: 'leaf', pane: editors.active });
     const across = (x: number) => spans.editor.x + x * spans.editor.w / 100;
-    const cols: Zone[] = rects.filter((r) => r.rect.y < 0.01).sort((a, b) => a.rect.x - b.rect.x).map((r) => ({ key: r.pane, kind: 'files', x0: across(r.rect.x), x1: across(r.rect.x + r.rect.w), editors: [r.pane] }));
-    for (const r of rects) {
-      if (r.rect.y < 0.01) continue;
-      const cx = across(r.rect.x + r.rect.w / 2);
-      (cols.find((c) => cx >= c.x0 && cx <= c.x1) ?? cols[cols.length - 1])?.editors.push(r.pane);
-    }
-    zones.push(...cols);
+    zones.push(...cols.map((c): Zone => ({ key: c.pane, kind: 'files', x0: across(c.x), x1: across(c.x + c.w), editors: c.editors })));
   }
   zones.sort((a, b) => a.x0 - b.x0);
   // In px along the row: the first stretch starts at the row's start and the last runs to its end, wherever the panes begin and end.
@@ -464,15 +458,22 @@ function TabBlock({ tab, ids, panes, leaving, n, front, focused, onScreen }: { t
   const reorder = (key: string, onto: string) => { const st = useStore.getState(); st.moveTab(st.tabs.findIndex((t) => t.id === key), st.tabs.findIndex((t) => t.id === onto)); };
   // Let go on another tab, this one joins it, and the terminal that was taken hold of keeps the keyboard.
   const onto = (key: string) => useStore.getState().joinTab(tab.id, key, { take: true });
-  // Right-click: combine it with the tab in front, or give the terminal clicked a tab of its own.
+  // Right-click: split beside the tab in front, combine with it, or give one terminal a tab of its own.
   const onMenu = async (e: React.MouseEvent) => {
     e.preventDefault();
     if (gone || !api.app.tabMenu) return;
     const seg = (e.target as HTMLElement).closest<HTMLElement>('.toptab')?.dataset.flip;
     const s = useStore.getState();
-    const pick = await api.app.tabMenu({ join: s.activeTab !== tab.id && tabGroups(s).some((t) => t.id === s.activeTab), part: shownTerms(s, tab).length > 1 });
+    const groups = tabGroups(s);
+    const current = groups.findIndex((t) => t.id === s.activeTab);
+    const clicked = groups.findIndex((t) => t.id === tab.id);
+    const join = current >= 0 && clicked >= 0 && current !== clicked;
+    const split = join && s.focus === 'terminal';
+    const pick = await api.app.tabMenu({ join, split, part: shownTerms(s, tab).length > 1 });
     const st = useStore.getState();
-    if (pick === 'join') st.joinTab(tab.id, st.activeTab);
+    if (pick === 'split' && split && st.activeTab === s.activeTab && st.focus === 'terminal') {
+      st.joinTab(tab.id, s.activeTab, { edge: clicked < current ? 'left' : 'right' });
+    } else if (pick === 'join') st.joinTab(tab.id, st.activeTab);
     else if (pick === 'part') st.moveTerm(seg && shownTerms(st, tab).includes(seg) ? seg : tab.activePane, null);
     else if (pick === 'close') st.closeTab(tab.id);
     if (pick) focusFront();
@@ -555,7 +556,7 @@ function FileRow({ pane, leaving, dirty, files, focused, onScreen }: { pane: Edi
   );
 }
 
-/** An open file. Right-click for a new file beside it. Dragged along its row it changes places; dragged onto another
+/** An open file. Right-click to split beside the focused file or make a new file. Dragged along its row it changes places; dragged onto another
  *  editor's row it joins that editor; dragged down among the panes it gets an editor of its own where the outline
  *  shows; dragged out of the window it becomes a window of its own. */
 function FileTab({ pane, path, temp, dirty, hint, active, shown, leaving }: { pane: string; path: string; /** A temporary tab: the next file opened takes its place. A double click keeps it. */ temp: boolean; dirty: boolean; /** The keys that bring it to the front. */ hint?: string; active: boolean; shown: boolean; leaving: boolean }) {
@@ -568,13 +569,17 @@ function FileTab({ pane, path, temp, dirty, hint, active, shown, leaving }: { pa
   const lang = icon !== 'graph' && icon !== 'file';
   const onMenu = async (e: React.MouseEvent) => {
     e.preventDefault();
-    if ((await api.fs.headerMenu()) === 'newFile') newFileBeside(path);
+    if (leaving) return;
+    const split = !!fileSplitSide(useStore.getState(), pane, path);
+    const pick = await api.fs.headerMenu({ split });
+    if (pick === 'newFile') newFileBeside(path);
+    else if (pick === 'split' && split) { useStore.getState().splitFileView(pane, path); focusFront(); }
   };
   // The other editor's stretch of the row under a point, if any.
   const rowAt = (x: number, y: number) => (document.elementsFromPoint(x, y).map((n) => n.closest<HTMLElement>('.zone.is-files')).find((z) => z && !z.querySelector(`.file-row[data-pane="${pane}"]`)) ?? null);
   const mark = (zone: HTMLElement | null) => document.querySelectorAll('.zone.is-target').forEach((z) => { if (z !== zone) z.classList.remove('is-target'); });
   const down = (e: React.MouseEvent<HTMLElement>) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 || e.ctrlKey) return;
     const st = useStore.getState();
     st.activateFile(pane, path); st.focusPane(pane); focusFront();
     if (leaving) return;

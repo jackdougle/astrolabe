@@ -750,7 +750,7 @@ html[data-theme="light"] .rich-title { color: color-mix(in srgb, color-mix(in sr
 .changes-bar { position: absolute; left: 50%; bottom: 8px; z-index: 7; transform: translateX(-50%); display: flex; align-items: center; gap: 1px; font: 500 11px var(--mono); white-space: nowrap; border-radius: 6px; overflow: hidden; background: var(--surface); box-shadow: 0 0 0 1px var(--line), 0 6px 18px rgb(0 0 0 / 0.3); animation: counts-in 0.14s var(--ease-out); }
 .changes-n { padding: 3px 10px 3px 11px; color: var(--text); box-shadow: inset 3px 0 0 var(--rv-add); }
 .changes-bar button { padding: 3px 9px; }
-.changes-step { padding: 3px 6px !important; }
+.changes-bar .changes-step { display: grid; place-items: center; padding: 3px 6px; }
 /* Its tab's mark turns green until the changes have been looked at. */
 .tab-file.has-changes:not(.is-dirty) { color: var(--rv-add); }
 

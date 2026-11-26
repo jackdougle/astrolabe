@@ -64,5 +64,5 @@ export async function openLink(href: string, baseDir: string) {
     store.showToast(`No such file: ${t.path}`); return;
   }
   if (st.dir) { api.app.reveal(t.path); return; }
-  store.openFile(t.path, t.line ? { line: t.line, col: t.col } : undefined);
+  store.openFile(t.path, t.line ? { line: t.line, col: t.col } : undefined, { fromLink: true });
 }
