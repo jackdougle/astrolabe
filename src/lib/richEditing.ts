@@ -1,6 +1,7 @@
 // What the raw (Monaco) view does while editing, for the rendered Markdown view: the line keys, bracket
 // pairs and the gliding caret, so the two views edit the same way and differ only in how the text looks.
 import { NodeSelection, Plugin, PluginKey, Selection, TextSelection } from '@milkdown/kit/prose/state';
+import { CellSelection } from '@milkdown/kit/prose/tables';
 import type { EditorState, Transaction } from '@milkdown/kit/prose/state';
 import type { EditorView } from '@milkdown/kit/prose/view';
 import { Fragment } from '@milkdown/kit/prose/model';
@@ -434,7 +435,7 @@ export const caret = $prose(() => new Plugin({
       if (!parent) return;
       if (host !== parent) { host = parent; host.appendChild(el); }
       const sel = view.state.selection;
-      if (!view.hasFocus() || !view.editable || sel instanceof NodeSelection) { hide(); return; }
+      if (!view.hasFocus() || !view.editable || sel instanceof NodeSelection || sel instanceof CellSelection) { hide(); return; }
       let at: { left: number; top: number; bottom: number };
       try { at = view.coordsAtPos(sel.head); } catch { hide(); return; }
       const box = host.getBoundingClientRect();

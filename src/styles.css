@@ -613,6 +613,18 @@ html[data-theme="light"] .rich-title { color: color-mix(in srgb, color-mix(in sr
 .rich table { border-collapse: collapse; font-size: 0.93em; max-width: 100%; }
 .rich th, .rich td { padding: 5px 11px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
 .rich th { background: var(--surface); font-weight: 600; }
+/* Picked cells (richTables.ts): tinted, with no text highlight or caret inside them. */
+.rich td.selectedCell, .rich th.selectedCell { background: color-mix(in srgb, var(--selection) 75%, transparent); }
+.rich .selectedCell ::selection, .rich .selectedCell::selection { background: transparent; }
+.rich .column-resize-handle { display: none; }
+/* The grips beside a hovered table's row and above its column. */
+.table-grip { position: fixed; z-index: 40; border-radius: 3px; background: color-mix(in srgb, var(--faint) 45%, transparent); opacity: 0; pointer-events: none; cursor: pointer; transition: opacity 0.12s, background-color 0.12s; }
+.table-grip.is-row { width: 5px; }
+.table-grip.is-col { height: 5px; }
+.table-grip.is-on { opacity: 1; pointer-events: auto; }
+.table-grip:hover { background: var(--dim); }
+.table-grip.is-picked { background: var(--accent); }
+.table-grip::after { content: ''; position: absolute; inset: -5px; }
 .rich img { max-width: 100%; height: auto; border-radius: 4px; vertical-align: bottom; }
 .rich img.ProseMirror-selectednode { outline: 2px solid var(--accent); outline-offset: 2px; }
 .rich ::selection { background: var(--selection); }

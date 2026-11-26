@@ -38,6 +38,7 @@ import { motion, shift } from './richMotion';
 import { symbolRules } from './richSymbols';
 import { underline, underlineHandler } from './richUnderline';
 import { bus } from './panes';
+import { tables } from './richTables';
 import { keep as keepChange, spans as changeSpans, subscribe as onChanges, undo as undoChange } from './review';
 import type { Span } from './review';
 
@@ -423,7 +424,7 @@ export async function mountRich(root: HTMLElement, model: monacoNs.editor.ITextM
       });
     })
     // > makes a toggle here, so the preset's own rule for it (a quote) is left out; so is its heading rule, for the one in richHashes.ts.
-    .use(commonmark.filter((plugin) => plugin !== wrapInBlockquoteInputRule && plugin !== wrapInHeadingInputRule)).use(gfm.filter((plugin) => plugin !== strikethroughInputRule && plugin !== wrapInTaskListInputRule)).use(notion).use(underline).use(collapseLinks).use(hashMark).use(headingRule)
+    .use(commonmark.filter((plugin) => plugin !== wrapInBlockquoteInputRule && plugin !== wrapInHeadingInputRule)).use(tables).use(gfm.filter((plugin) => plugin !== strikethroughInputRule && plugin !== wrapInTaskListInputRule)).use(notion).use(underline).use(collapseLinks).use(hashMark).use(headingRule)
     .use(history).use(linkPaste).use(clipboard).use(listener).use(extras).use(pairs).use(notionRules).use(emojiRule).use(symbolRules).use(clicks).use(tickMotion).use(cutLine).use(joinNotes).use(hashes).use(imageView).use(imageDrops).use(motion).use(shift).use(drawnSelection).use(caret).use(reviewMarks).use(findMarks)
     .create();
 

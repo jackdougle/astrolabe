@@ -89,7 +89,7 @@ export const THEMES: Theme[] = [
     selection: '#B6E3FF', yellow: '#9A6700',
     code: { keyword: '#CF222E', string: '#0A3069', number: '#0550AE', type: '#953800', variable: '#953800' } },
   { id: 'github-dark-hc', name: 'GitHub Dark High Contrast', dark: true, twin: 'github-light-hc',
-    bg: '#0A0C10', bgDeep: '#010409', surface: '#151B23', surfaceHi: '#272B33', line: '#7A828E',
+    bg: '#050608', bgDeep: '#000102', surface: '#0D1117', surfaceHi: '#1E2229', line: '#7A828E',
     text: '#F0F3F6', dim: '#BDC4CC', faint: '#9EA7B3',
     accent: '#71B7FF', ok: '#26CD4D', err: '#FF6A69', info: '#71B7FF', violet: '#CB9EFF', cyan: '#56D4DD',
     selection: '#1E4273', yellow: '#F0B72F',

@@ -3,6 +3,7 @@
 // paragraph meet, so a selection reads as one shape, and only the corners that stick out are rounded.
 // Inside a code block the browser's own highlight stays: the block has a background this layer would sit behind.
 import { NodeSelection, Plugin } from '@milkdown/kit/prose/state';
+import { CellSelection } from '@milkdown/kit/prose/tables';
 import type { EditorView } from '@milkdown/kit/prose/view';
 import { $prose } from '@milkdown/kit/utils';
 
@@ -89,7 +90,7 @@ export const drawnSelection = $prose(() => new Plugin({
       if (!parent) return;
       if (host !== parent) { host = parent; host.prepend(layer); }
       const sel = view.state.selection;
-      if (sel.empty || sel instanceof NodeSelection || !view.hasFocus()) { clear(); return; }
+      if (sel.empty || sel instanceof NodeSelection || sel instanceof CellSelection || !view.hasFocus()) { clear(); return; }
       const boxes = lineBoxes(view);
       const origin = host.getBoundingClientRect();
       while (layer.childElementCount > boxes.length) layer.lastElementChild!.remove();
