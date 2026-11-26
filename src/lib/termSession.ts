@@ -67,6 +67,10 @@ export function allSessions() { return [...sessions.values()]; }
  *  character is the one that matters: a pasted "end of paste" mark would let whatever follows it be typed, and run. */
 const pasteSafe = (text: string) => text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]/g, '');
 const UNSAFE_PASTE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]/;
+/** How long to wait after the last size change before telling the shell. Longer than the pane glide (--enter is
+ *  0.22s): a fit mid-glide, then another when it settles, makes agent TUIs reprint onto an already-rewrapped
+ *  screen and leave old characters behind. */
+const REFIT_MS = 280;
 
 function b64(s: string) {
   try { return new TextDecoder().decode(Uint8Array.from(atob(s), (c) => c.charCodeAt(0))); } catch { return ''; }
@@ -134,6 +138,12 @@ export class TermSession {
   private tick: number | undefined;
   private settle: number | undefined;
   private parked: number | undefined;
+  /** Ignores late `provideLinks` replies after the pointer has moved to another row. */
+  private linkGen = 0;
+  /** GPU renderer while this terminal is on screen. Hidden tabs drop it so opening another terminal does not
+   *  blow Chromium's WebGL context budget and leave ghost frames on the terminals that lost theirs. */
+  private webgl: WebglAddon | null = null;
+  private wantGpu = false;
   blocks: Block[] = [];
   selected: Block | null = null;
   state: 'boot' | 'prompt' | 'running' = 'boot';
@@ -163,7 +173,7 @@ export class TermSession {
           else useStore.getState().showToast(`Hold ⌘ and click to open the ${fileTarget(uri, '/') ? 'file' : 'link'}`);
         },
         // The terminal underlines the piece under the pointer. The link's pieces on other rows are underlined with it.
-        hover: (_ev, uri, range) => this.underline(this.oscPieces(uri, range.start.y)),
+        hover: (_ev, _uri, range) => this.underline(this.oscPieces(range.start.x - 1, range.start.y - 1)),
         leave: () => this.underline([]),
       },
     });
@@ -184,10 +194,27 @@ export class TermSession {
     this.term.onData((d) => this.fromTerminal(d));
     this.term.onBinary((d) => api.pty.write(this.id, d));
     this.term.onResize(({ cols, rows }) => { if (this.spawned) api.pty.resize(this.id, cols, rows); this.schedule(); });
-    this.term.onScroll(() => this.schedule());
+    this.term.onLineFeed(() => {
+      // Some agents forget to close an anonymous OSC 8 span. End it at an explicit line feed, not a
+      // soft wrap. Use xterm's parsed state so split PTY writes and unrelated escapes are left alone.
+      const core = (this.term as any)._core;
+      const input = core._inputHandler;
+      const id = input?._getCurrentLinkId?.();
+      const link = id && core._oscLinkService.getLinkData(id);
+      if (link && !link.id) input.setHyperlink(';');
+    });
+    this.term.onScroll(() => { this.underline([]); this.schedule(); });
     this.term.onRender(() => this.schedule());
     this.term.onWriteParsed(() => this.schedule());
-    this.term.registerLinkProvider({ provideLinks: (y, cb) => { this.provideLinks(y).then(cb, () => cb(undefined)); } });
+    this.term.registerLinkProvider({
+      provideLinks: (y, cb) => {
+        const gen = ++this.linkGen;
+        this.provideLinks(y).then(
+          (links) => { if (gen === this.linkGen) cb(links); },
+          () => { if (gen === this.linkGen) cb(undefined); },
+        );
+      },
+    });
     // Text pasted straight into the terminal: xterm would send it as it is, control characters and all.
     this.host.addEventListener('paste', (e) => {
       const text = e.clipboardData?.getData('text/plain') ?? '';
@@ -203,7 +230,7 @@ export class TermSession {
     this.ro = new ResizeObserver(() => {
       if (!this.spawned) { this.refit(); return; }
       window.clearTimeout(this.settle);
-      this.settle = window.setTimeout(() => this.refit(), 140);
+      this.settle = window.setTimeout(() => this.refit(), REFIT_MS);
     });
     sessions.set(id, this);
     this.uncarry = carry(`term:${id}`, () => this.snapshot());
@@ -296,30 +323,73 @@ export class TermSession {
       // The GPU renderer can leave the terminal's own caret painted after focus moves to the command input,
       // which showed as a second caret stuck at the start of the line. Repaint when the terminal lets go.
       this.term.textarea?.addEventListener('blur', () => this.repaintCaret());
-      try {
-        const gl = new WebglAddon();
-        gl.onContextLoss(() => gl.dispose());
-        this.term.loadAddon(gl);
-      } catch {}
       this.ro.observe(this.host);
     }
     this.refit();
   }
 
+  /** Use the GPU renderer only while this terminal is actually on screen. Every tab kept a live WebGL
+   *  context before; past Chromium's limit (often ~8–16), an older terminal lost its context and could
+   *  show uncleared frames — the intermittent "ghost text" when opening another terminal. */
+  setGpu(on: boolean) {
+    this.wantGpu = on;
+    if (!this.opened || this.disposed) return;
+    if (!on) {
+      this.underline([]);
+      this.dropGpu();
+      return;
+    }
+    if (!this.webgl) {
+      const gl = new WebglAddon();
+      gl.onContextLoss(() => {
+        // Stay on the DOM renderer for this visit if the context cannot be restored.
+        if (this.webgl === gl) this.dropGpu();
+      });
+      this.webgl = gl;
+      try { this.term.loadAddon(gl); } catch { this.dropGpu(); }
+    }
+    this.term.refresh(0, this.term.rows - 1);
+  }
+
+  private dropGpu() {
+    if (!this.webgl) return;
+    const addon = this.webgl;
+    this.webgl = null;
+    const context = (addon as unknown as { _renderer?: { _gl?: WebGL2RenderingContext } })._renderer?._gl;
+    try { addon.dispose(); } finally {
+      // Detaching the canvas alone leaves the context live until GC, so rapid switching can still evict
+      // a context in use. Release it after xterm removes its own context-loss listener.
+      context?.getExtension('WEBGL_lose_context')?.loseContext();
+    }
+    this.term.refresh(0, this.term.rows - 1);
+  }
+
   refit() {
     if (this.disposed || this.resuming || !this.opened || this.host.offsetWidth < 8 || this.host.offsetHeight < 8) return;
     const next = this.fit.proposeDimensions();
-    if (this.native && this.spawned && this.state === 'prompt' && next && next.cols !== this.term.cols) {
+    if (!next) return;
+    // Same size: still refresh so a new pane's WebGL layer cannot leave a previous frame painted over this one.
+    if (this.spawned && next.cols === this.term.cols && next.rows === this.term.rows) {
+      this.term.refresh(0, this.term.rows - 1);
+      this.schedule();
+      return;
+    }
+    if (this.native && this.spawned && this.state === 'prompt' && next.cols !== this.term.cols) {
       // Your prompt is on screen and the width is about to change. A full-width prompt line would wrap
       // and be left behind when the shell redraws it, so wipe the prompt first and let the shell repaint.
       const buf = this.term.buffer.normal;
       const row = buf.baseY + buf.cursorY;
       const head = this.pendingHead && !this.pendingHead.isDisposed && this.pendingHead.line >= 0 ? this.pendingHead.line + (this.pendingPartial ? 1 : 0) : row;
       const up = Math.max(0, Math.min(row - head, buf.cursorY));
-      this.term.write(`\x1b7${up ? `\x1b[${up}A` : ''}\r\x1b[0J\x1b8`, () => { try { this.fit.fit(); } catch {} this.schedule(); });
+      this.term.write(`\x1b7${up ? `\x1b[${up}A` : ''}\r\x1b[0J\x1b8`, () => {
+        try { this.fit.fit(); } catch {}
+        this.term.refresh(0, this.term.rows - 1);
+        this.schedule();
+      });
       return;
     }
     try { this.fit.fit(); } catch {}
+    this.term.refresh(0, this.term.rows - 1);
     if (!this.spawned) {
       this.spawned = true;
       this.native = useStore.getState().settings.prompt !== 'astrolabe';
@@ -853,57 +923,33 @@ export class TermSession {
     }
   }
 
-  /** The pieces, on the rows around `y` (counted from 1), of a link a program marked itself (OSC 8) and broke over several rows. */
-  private oscPieces(uri: string, y: number) {
+  /** Follow a marked link across a soft wrap only. The same destination on the next hard line is a
+   *  separate link, not evidence that this label continues there. */
+  private oscPieces(x: number, y: number) {
     const out: { row: number; x: number; w: number }[] = [];
-    try {
-      const core = (this.term as any)._core;
-      const lines = core._bufferService.buffer.lines;
-      const cols = this.term.cols;
-      /** Cells on `row` that belong to `uri`, and the urlIds those cells use. */
-      const piece = (row: number) => {
-        const marks = lines.get(row)?._extendedAttrs as Record<number, { urlId?: number } | undefined> | undefined;
-        let a = -1; let b = -1;
-        const ids = new Set<number>();
-        for (const k in marks) {
-          const id = marks[k]?.urlId;
-          if (!id || core._oscLinkService.getLinkData(id)?.uri !== uri) continue;
-          const x = Number(k);
-          if (x >= cols) continue;
-          ids.add(id);
-          if (a < 0 || x < a) a = x;
-          if (x > b) b = x;
-        }
-        return a < 0 ? null : { row, x: a, w: b - a + 1, ids };
-      };
-      // A program that opens OSC 8 and never closes it leaves the same urlId on every cell after the
-      // link (Claude Code's prompt, after a pasted URL, has done this). Matching by URI alone then
-      // underlines every row below. Same urlId only continues when the link actually runs onto the
-      // next row (wrapped, or written to the right edge). A fresh OSC 8 open of the same address
-      // (different urlId) is still a piece of the link — Claude Code breaks long file links that way.
-      const atEdge = (p: { x: number; w: number }) => p.x + p.w >= cols;
-      const wrapped = (row: number) => !!this.term.buffer.active.getLine(row)?.isWrapped;
-      for (const step of [-1, 1]) {
-        let prev = piece(y - 1);
-        if (!prev) break;
-        let chain = new Set(prev.ids);
-        for (let row = y - 1 + step, n = 0; n < 12 && row >= 0; row += step, n++) {
-          const p = piece(row);
-          if (!p) break;
-          const shared = [...p.ids].some((id) => chain.has(id));
-          if (shared) {
-            // Same OSC 8 span: only if it continues from the higher row onto the lower.
-            const higher = step > 0 ? prev : p;
-            const lower = step > 0 ? row : prev.row;
-            if (!atEdge(higher) && !wrapped(lower)) break;
-          }
-          // else: same URI, new urlId — a program re-opened the link on this row.
-          out.push({ row: p.row, x: p.x, w: p.w });
-          for (const id of p.ids) chain.add(id);
-          prev = p;
-        }
-      }
-    } catch {}
+    const buf = this.term.buffer.active;
+    const lines = (this.term as any)._core._bufferService.buffer.lines;
+    const cols = this.term.cols;
+    const mark = (row: number, col: number) => lines.get(row)?._extendedAttrs?.[col]?.urlId;
+    const id = mark(y, x);
+    if (!id) return out;
+    const piece = (row: number, col: number) => {
+      let a = col; let b = col;
+      while (a > 0 && mark(row, a - 1) === id) a--;
+      while (b + 1 < cols && mark(row, b + 1) === id) b++;
+      return { row, x: a, w: b - a + 1 };
+    };
+    const start = piece(y, x);
+    for (let p = start; p.x === 0 && p.row > 0 && buf.getLine(p.row)?.isWrapped && y - p.row < 12;) {
+      if (mark(p.row - 1, cols - 1) !== id) break;
+      p = piece(p.row - 1, cols - 1);
+      out.push(p);
+    }
+    for (let p = start; p.x + p.w === cols && buf.getLine(p.row + 1)?.isWrapped && p.row - y < 12;) {
+      if (mark(p.row + 1, 0) !== id) break;
+      p = piece(p.row + 1, 0);
+      out.push(p);
+    }
     return out;
   }
 
@@ -959,15 +1005,21 @@ export class TermSession {
     };
     const links: any[] = [];
     const url = /https?:\/\/[^\s"'<>)\]]+/g;
-    let m: RegExpExecArray | null;
-    while ((m = url.exec(text))) {
-      const href = m[0].replace(/[.,;:]+$/, '');
-      const range = onRow(m.index, href.length);
-      if (!range) continue;
-      links.push({
-        range, text: href, ...elsewhere(m.index, href.length),
-        activate: (ev: MouseEvent) => { if (ev.metaKey) api.app.openExternal(href); else useStore.getState().showToast('Hold ⌘ and click to open the link'); },
-      });
+    // Only file lookup can validate a guessed join. URLs must stop at real line breaks, both for hover
+    // and for the destination ⌘-click opens.
+    const boundaries = [0, ...guessed, text.length];
+    for (let i = 0; i + 1 < boundaries.length; i++) {
+      const start = boundaries[i];
+      for (const m of text.slice(start, boundaries[i + 1]).matchAll(url)) {
+        const href = m[0].replace(/[.,;:]+$/, '');
+        const at = start + m.index;
+        const range = onRow(at, href.length);
+        if (!range) continue;
+        links.push({
+          range, text: href, ...elsewhere(at, href.length),
+          activate: (ev: MouseEvent) => { if (ev.metaKey) api.app.openExternal(href); else useStore.getState().showToast('Hold ⌘ and click to open the link'); },
+        });
+      }
     }
     const cwd = this.cwd();
     const SUFFIX = String.raw`(?::\d+(?::\d+)?|#L\d+(?:C\d+)?(?:-L?\d+)?)?`;
@@ -1035,6 +1087,7 @@ export class TermSession {
    *  (`takeParked`). Its shell and its screen carry on meanwhile. `input` is what the command input held. */
   park(input: string) {
     if (this.disposed) return;
+    this.setGpu(false);
     this.resumedInput = input;
     this.inputText = null; this.onEarlyInput = null; this.wantInput = null; this.inputEl = null;
     // A pane that never comes for it leaves nothing running unseen.
@@ -1049,7 +1102,9 @@ export class TermSession {
 
   dispose() {
     if (this.disposed) return;
+    this.setGpu(false);
     this.disposed = true;
+    this.linkGen++;
     window.clearTimeout(this.parked);
     this.underline([]);
     window.clearInterval(this.tick);

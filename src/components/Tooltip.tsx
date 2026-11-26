@@ -1,11 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { commands, formatKeys } from '../lib/commands';
+import { commandKeys, commands, formatKeys } from '../lib/commands';
 
 /** Props for a button's hover tip: its name, and its shortcut. `keys` is a command id (the shortcut is read
  *  from the command, so it stays right if the binding changes) or a key written out, such as "Esc". */
 export function tip(label: string, keys?: string) {
   const cmd = keys ? commands.find((c) => c.id === keys) : undefined;
-  const shown = cmd ? (cmd.keys?.[0] ? formatKeys(cmd.keys[0]) : undefined) : keys;
+  const shown = cmd ? commandKeys(cmd).slice(0, 1).map(formatKeys)[0] : keys;
   return { 'data-tip': label, 'data-keys': shown, 'aria-label': label };
 }
 

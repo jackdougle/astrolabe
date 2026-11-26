@@ -10,7 +10,7 @@ import { Icon } from './Icons';
 
 let inputSeq = 0;
 
-export function TerminalPane({ pane, active }: { pane: TermPane; active: boolean }) {
+export function TerminalPane({ pane, active, visible = true }: { pane: TermPane; active: boolean; /** On the tab that is showing, and not itself hidden. */ visible?: boolean }) {
   const areaRef = useRef<HTMLDivElement>(null);
   const inputWrapRef = useRef<HTMLDivElement>(null);
   const inputHostRef = useRef<HTMLDivElement>(null);
@@ -173,6 +173,15 @@ export function TerminalPane({ pane, active }: { pane: TermPane; active: boolean
   }, [pane.id]);
 
   useEffect(() => { if (pane.exited) closePane(pane.id); }, [pane.exited]);
+
+  // Drop the GPU context while this terminal is off screen (another tab, or ⌘U-hidden), so opening more
+  // terminals cannot exhaust WebGL and ghost old frames onto the ones that lost their context.
+  useEffect(() => {
+    const session = sessionRef.current;
+    if (!visible || !session) return;
+    session.setGpu(true);
+    return () => session.setGpu(false);
+  }, [pane.id, visible]);
 
   useEffect(() => {
     sessionRef.current?.applyAppearance();

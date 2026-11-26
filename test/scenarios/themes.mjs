@@ -1,8 +1,8 @@
-// The built-in themes: Tokyo Night (Night, Storm, Moon, Day), Pure Black and White, GitHub and GitHub High Contrast,
+// The built-in themes: Tokyo Night (Night and Day), Pure Black and White, GitHub and GitHub High Contrast,
 // each with its light or dark twin on ⌘0, and back to the very theme you left.
 import path from 'node:path';
-export const settings = { zoom: 1, previewTabs: false, theme: 'tokyo-storm' };
-const IDS = ['tokyo-night', 'tokyo-storm', 'tokyo-moon', 'tokyo-day', 'pure-black', 'pure-white', 'github-dark', 'github-light', 'github-dark-hc', 'github-light-hc'];
+export const settings = { zoom: 1, previewTabs: false, theme: 'tokyo-night' };
+const IDS = ['tokyo-night', 'tokyo-day', 'pure-black', 'pure-white', 'github-dark', 'github-light', 'github-dark-hc', 'github-light-hc'];
 export default async function ({ page, shot, run, work }) {
   let fails = 0;
   const ok = (name, pass, detail = '') => { if (!pass) fails += 1; console.log(`${pass ? 'ok  ' : 'FAIL'} ${name}${detail && !pass ? `: ${detail}` : ''}`); };
@@ -21,8 +21,8 @@ export default async function ({ page, shot, run, work }) {
     await shot(`theme-${id}`);
   }
   ok('pure black is black', (await page.evaluate((t) => { window.__store.getState().updateSettings({ theme: 'pure-black' }); return getComputedStyle(document.documentElement).getPropertyValue('--bg').trim(); })).toUpperCase() === '#000000');
-  // ⌘0: Storm → Day → Storm (not Night), GitHub Dark HC → Light HC → Dark HC, Pure Black ⇄ White.
-  const pairs = [['tokyo-storm', 'tokyo-day'], ['github-dark-hc', 'github-light-hc'], ['pure-black', 'pure-white'], ['github-light', 'github-dark']];
+  // ⌘0: Night → Day → Night, GitHub Dark HC → Light HC → Dark HC, Pure Black ⇄ White.
+  const pairs = [['tokyo-night', 'tokyo-day'], ['github-dark-hc', 'github-light-hc'], ['pure-black', 'pure-white'], ['github-light', 'github-dark']];
   for (const [a, b] of pairs) {
     await page.evaluate((t) => window.__store.getState().updateSettings({ theme: t, themeBefore: 'antares' }), a); await at(300);
     await page.keyboard.press('Meta+0'); await at(400);

@@ -815,8 +815,8 @@ function buildMenu() {
       { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' },
     ] },
     { label: 'File', submenu: [
-      { label: 'New Note', accelerator: 'CmdOrCtrl+N', click: send('note.newInRepo') },
-      { label: 'New Window', accelerator: 'Shift+CmdOrCtrl+N', click: () => createWindow() },
+      { label: 'New Note', click: send('note.newInRepo') },
+      { label: 'New Window', click: () => createWindow() },
       { label: 'New Tab', click: send('tab.new') },
       { type: 'separator' },
       { label: 'Open File…', click: send('palette.files') },
@@ -834,11 +834,11 @@ function buildMenu() {
       { label: 'Split Down', click: send('pane.splitDown') },
       { type: 'separator' },
       // ⌃⌘F (and Fn+F, handled in the page) expand the editor, so full screen moves off macOS's usual keys.
-      { label: 'Expand or Split', accelerator: 'Ctrl+Cmd+F', click: send('editor.expand') },
-      { label: 'Switch Displays', accelerator: 'Ctrl+Cmd+S', click: send('editor.swapSide') },
+      { label: 'Expand or Split', click: send('editor.expand') },
+      { label: 'Switch Displays', click: send('editor.swapSide') },
       { label: 'Toggle Full Screen', click: () => { const w = BrowserWindow.getFocusedWindow(); w?.setFullScreen(!w.isFullScreen()); } },
-      { label: 'Developer Tools', accelerator: 'Alt+CmdOrCtrl+I', click: () => BrowserWindow.getFocusedWindow()?.webContents.toggleDevTools() },
-      { label: 'Reload Window', accelerator: 'Alt+CmdOrCtrl+R', click: () => { const w = BrowserWindow.getFocusedWindow(); if (w) void reloadWindow(w); } },
+      { label: 'Developer Tools', click: () => BrowserWindow.getFocusedWindow()?.webContents.toggleDevTools() },
+      { label: 'Reload Window', click: () => { const w = BrowserWindow.getFocusedWindow(); if (w) void reloadWindow(w); } },
     ] },
     { label: 'Window', submenu: [{ role: 'minimize' }, { role: 'zoom' }, { type: 'separator' }, { role: 'front' }] },
   ]));
@@ -1153,6 +1153,8 @@ function registerIpc() {
   ipcMain.on('app:zoom', (e, factor: number) => { e.sender.setZoomFactor(Math.min(2, Math.max(0.5, factor))); });
   ipcMain.on('app:openExternal', (_e, url: string) => { if (/^(https?|mailto):/.test(url)) shell.openExternal(url); });
   ipcMain.on('app:reveal', (_e, file: string) => shell.showItemInFolder(file));
+  ipcMain.on('app:reloadWindow', (e) => { const w = BrowserWindow.fromWebContents(e.sender); if (w) void reloadWindow(w); });
+  ipcMain.on('app:toggleDevTools', (e) => e.sender.toggleDevTools());
   ipcMain.on('app:newWindow', () => createWindow());
   ipcMain.on('tear:over', (e, spec: TearSpec | null) => {
     const win = BrowserWindow.fromWebContents(e.sender);

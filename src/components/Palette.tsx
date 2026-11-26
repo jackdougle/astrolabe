@@ -1,46 +1,48 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, basename } from '../lib/api';
-import { commands, formatKeys, hotkeys } from '../lib/commands';
+import { bindingConflict, commandKeys, commands, defaultBindingConflict, formatKeys, handleShortcut, hotkeys, keyOf, setCommandKeys, shortcutLabel } from '../lib/commands';
 import { applyHeadingFont, applyNotesFont, BUNDLED, faceOf, FontInfo, googleFonts, loadGoogleFont, SYSTEM } from '../lib/fonts';
 import { fuzzyFilter } from '../lib/fuzzy';
 import { history, MONO, setMonacoTheme } from '../lib/monaco';
 import { bus, focusPane } from '../lib/panes';
-import { activeTermPane, focusedId, isMarkdown, outputWeight, PaletteMode, projectRoot, Settings, useStore } from '../lib/store';
-import { applyTheme, getTheme, THEMES } from '../lib/themes';
+import { activeTermPane, DEFAULT_SETTINGS, focusedId, isMarkdown, outputWeight, PaletteMode, projectRoot, Settings, useStore } from '../lib/store';
+import { Icon } from './Icons';
+import { applyTheme, getTheme, THEMES, type Theme } from '../lib/themes';
 
-interface Row { key: string; label: string; detail?: string; hint?: string; positions?: number[]; /** `side`: chosen with ⌘ held. */ run: (side?: boolean) => void; preview?: () => void; /** CSS font stack the label is drawn in. */ face?: string; /** Google Fonts family to fetch once the row is on screen. */ load?: string }
+interface Row { theme?: Theme; size?: FontSizeKey; key: string; label: string; detail?: string; hint?: string; positions?: number[]; /** `side`: chosen with ⌘ held. */ run: (side?: boolean) => void; preview?: () => void; /** CSS font stack the label is drawn in. */ face?: string; /** Google Fonts family to fetch once the row is on screen. */ load?: string }
 const LITERATA_FACE = '"Literata Variable", Georgia, serif';
 
 const PLACEHOLDER: Record<PaletteMode, string> = {
   commands: 'Run a command',
   files: 'Open a note by name, last edited first (⌘↩: to the side). A . brings in other files, > commands',
   history: 'Search past commands',
-  themes: 'Choose a theme',
+  themes: 'Themes',
   'fonts-notes': 'Search Google Fonts for the text of notes',
   'fonts-headings': 'Search Google Fonts for note headings',
   'fonts-code': 'Search monospaced Google Fonts for the terminal and editor',
   settings: 'Settings',
-  appearance: 'Theme, starfield, note title, wire artwork',
-  fonts: 'Which font',
-  sizes: 'Font and navigator sizes',
+  appearance: '',
+  fonts: 'Fonts and sizes',
   behaviour: 'Editing, terminal and session options',
-  keys: 'Hotkeys: type to search (Enter runs one)',
+  keys: 'Search hotkeys (Enter to edit)',
 };
 
 // Escape steps back to the menu a mode was opened from; the top-level modes close.
 const PARENT: Partial<Record<PaletteMode, PaletteMode>> = {
-  appearance: 'settings', fonts: 'settings', sizes: 'settings', behaviour: 'settings',
+  appearance: 'settings', fonts: 'settings', behaviour: 'settings',
   'fonts-notes': 'fonts', 'fonts-headings': 'fonts', 'fonts-code': 'fonts',
 };
 
 type Choice = Omit<Row, 'positions'>;
 const SCROLL_STEPS = [1, 1.5, 2, 2.5, 3, 4];
 const WEIGHTS: Record<number, string> = { 400: 'Regular', 500: 'Medium', 600: 'Semibold' };
-const SIZE_STEPS = {
-  fontSize: [11, 12, 12.5, 13, 14, 15, 16],
-  notesSize: [0.9, 1, 1.1, 1.2, 1.35],
-  sidebarSize: [11, 12, 12.67, 13, 14, 15],
-} as const;
+type FontSizeKey = 'fontSize' | 'notesSize' | 'headingSize' | 'sidebarSize';
+const px = (value: number) => Number(value.toFixed(2));
+function sizeInPx(settings: Settings, field: FontSizeKey) {
+  if (field === 'notesSize') return px(settings.notesSize * 14);
+  if (field === 'headingSize') return px(settings.headingSize ?? settings.notesSize * 14 * 2.2);
+  return settings[field];
+}
 
 export function Palette() {
   const palette = useStore((s) => s.palette);
@@ -60,7 +62,13 @@ function PaletteBody({ initial }: { initial: PaletteMode }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const root = useStore((s) => projectRoot(s));
-  const originalTheme = useRef(useStore.getState().settings.theme);
+  const [editing, setEditing] = useState<string>();
+  const [recording, setRecording] = useState<number>();
+  const [bindingError, setBindingError] = useState('');
+  const binding = commands.find((c) => c.id === editing);
+  const shortcuts = binding ? commandKeys(binding) : [];
+  const lightCommand = commands.find((c) => c.id === 'view.light')!;
+  const lightKeys = commandKeys(lightCommand);
   const committed = useRef(false);
 
   const settings = useStore((s) => s.settings);
@@ -68,7 +76,7 @@ function PaletteBody({ initial }: { initial: PaletteMode }) {
   const revertPreview = () => {
     previewSeq.current++;
     if (committed.current) return;
-    if (mode === 'themes' || mode === 'appearance') { const t = getTheme(originalTheme.current); applyTheme(t); setMonacoTheme(t); bus.emit('theme.preview'); }
+    if (mode === 'themes' || mode === 'appearance') { const t = getTheme(useStore.getState().settings.theme); applyTheme(t, useStore.getState().settings.accentColor); setMonacoTheme(t); bus.emit('theme.preview'); }
     if (mode === 'fonts-notes') applyNotesFont(originalFonts.current.notes);
     if (mode === 'fonts-headings') applyHeadingFont(originalFonts.current.headings);
     if (mode === 'fonts-code') useStore.getState().updateSettings({ fontFamily: originalFonts.current.code });
@@ -106,36 +114,40 @@ function PaletteBody({ initial }: { initial: PaletteMode }) {
     const weightNow = Number(outputWeight(settings));
     const weightNext = weightNow >= 600 ? 400 : weightNow + 100;
     if (mode === 'settings') return choose([
-      { key: 'appearance', label: 'Appearance and themes', detail: getTheme(settings.theme).name, run: () => go('appearance') },
-      { key: 'fonts', label: 'Fonts', detail: settings.fontFamily || 'Commit Mono', run: () => go('fonts') },
-      { key: 'sizes', label: 'Font sizes', detail: `${settings.fontSize}px terminal, ${settings.sidebarSize}px navigator`, run: () => go('sizes') },
-      { key: 'behaviour', label: 'Behaviour', detail: `smooth caret ${on(settings.smoothCaret)}`, run: () => go('behaviour') },
-      { key: 'keys', label: 'Hotkeys', detail: 'every keyboard shortcut', run: () => go('keys') },
-      { key: 'file', label: 'Open settings file', hint: formatKeys('cmd+,'), run: () => { close(); commands.find((c) => c.id === 'settings.open')?.run(); } },
+      { key: 'appearance', label: 'Appearance and themes', run: () => go('appearance') },
+      { key: 'fonts', label: 'Fonts', run: () => go('fonts') },
+      { key: 'behaviour', label: 'Behaviour', run: () => go('behaviour') },
+      { key: 'keys', label: 'Hotkeys', run: () => go('keys') },
+      { key: 'file', label: 'Open settings file', hint: shortcutLabel('settings.open'), run: () => { close(); commands.find((c) => c.id === 'settings.open')?.run(); } },
     ]);
-    if (mode === 'appearance') return choose([
-      ...THEMES.map((t): Choice => ({
-        key: `theme:${t.id}`, label: t.name, detail: (t.dark ? 'Dark' : 'Light') + (t.id === settings.theme ? ', in use' : ''),
-        preview: () => { applyTheme(t); setMonacoTheme(t); bus.emit('theme.preview', t.id); },
-        run: () => { committed.current = true; useStore.getState().updateSettings({ theme: t.id }); setMonacoTheme(t); close(); },
-      })),
+    const themeRows = () => choose(THEMES.filter((t) => t.dark === getTheme(settings.theme).dark).map((t) => ({
+      key: `theme:${t.id}`, label: t.name.replace(/^(GitHub) (?:Dark|Light)/, '$1').replace(/^Pure White$/, 'Pure').replace(/^Tokyo Night Day$/, 'Tokyo Night'),
+      theme: t,
+      preview: () => { applyTheme(t, settings.accentColor); setMonacoTheme(t); bus.emit('theme.preview', t.id); },
+      run: () => { committed.current = true; useStore.getState().updateSettings({ theme: t.id }); setMonacoTheme(t); close(); },
+    })));
+    if (mode === 'themes') return themeRows();
+    if (mode === 'appearance') return [...choose([
+      { key: 'starfield', label: 'Starfield behind the window', detail: on(settings.starfield), run: () => flip('starfield') },
+      { key: 'accent-color', label: 'Accent colour', detail: settings.accentColor, run: () => {
+        const value = window.prompt('Accent colour (hex)', settings.accentColor);
+        if (value && /^#[0-9a-f]{6}$/i.test(value.trim())) useStore.getState().updateSettings({ accentColor: value.trim() });
+      } },
       { key: 'noteTitle', label: 'File name as a title on rendered notes', detail: on(settings.noteTitle), run: () => flip('noteTitle') },
       { key: 'titleWires', label: 'Wire artwork around the note title', detail: settings.noteTitle ? on(settings.titleWires) : 'Off (the title is off)', run: () => flip('titleWires') },
-      { key: 'starfield', label: 'Starfield behind the window', detail: on(settings.starfield), run: () => flip('starfield') },
-    ]);
+    ]), ...themeRows()];
     if (mode === 'fonts') return choose([
-      { key: 'code', label: 'Terminal and code font', detail: settings.fontFamily || 'Commit Mono, built in', run: () => go('fonts-code') },
-      { key: 'notes', label: 'Notes text font', detail: settings.notesFont || 'SF Pro, built in', run: () => go('fonts-notes') },
-      { key: 'headings', label: 'Notes heading font', detail: settings.headingFont || 'Literata, built in', run: () => go('fonts-headings') },
+      { key: 'code', size: 'fontSize', label: 'Terminal and code font', detail: settings.fontFamily || 'Commit Mono, built in', run: () => go('fonts-code') },
+      { key: 'notes', size: 'notesSize', label: 'Notes text font', detail: settings.notesFont || 'SF Pro, built in', run: () => go('fonts-notes') },
+      { key: 'headings', size: 'headingSize', label: 'Notes heading font', detail: settings.headingFont || 'Literata, built in', run: () => go('fonts-headings') },
+      { key: 'navigator', size: 'sidebarSize', label: 'Navigator', run: () => listRef.current?.querySelector<HTMLInputElement>('[data-size="sidebarSize"] input')?.focus() },
       { key: 'outputWeight', label: `Terminal text weight: ${WEIGHTS[weightNow]}`, detail: `click for ${WEIGHTS[weightNext].toLowerCase()}`, run: () => useStore.getState().updateSettings({ outputWeight: weightNext }) },
+      { key: 'reset', label: 'Reset font sizes', run: () => {
+        const { fontSize, notesSize, headingSize, sidebarSize } = DEFAULT_SETTINGS;
+        useStore.getState().updateSettings({ fontSize, notesSize, headingSize, sidebarSize });
+      } },
     ]);
-    // Sizes and options stay open while you change them, so you can try several in a row.
-    if (mode === 'sizes') return choose([
-      ...SIZE_STEPS.fontSize.map((v): Choice => ({ key: `fs${v}`, label: `Terminal and code ${v}px`, detail: settings.fontSize === v ? 'in use' : '', run: () => useStore.getState().updateSettings({ fontSize: v }) })),
-      ...SIZE_STEPS.notesSize.map((v): Choice => ({ key: `ns${v}`, label: `Notes text ${Math.round(14 * v)}px`, detail: settings.notesSize === v ? 'in use' : '', run: () => useStore.getState().updateSettings({ notesSize: v }) })),
-      ...SIZE_STEPS.sidebarSize.map((v): Choice => ({ key: `ss${v}`, label: `Navigator ${v}px`, detail: settings.sidebarSize === v ? 'in use' : '', run: () => useStore.getState().updateSettings({ sidebarSize: v }) })),
-      { key: 'reset', label: 'Reset font sizes', detail: 'terminal 12.5px, notes 14px, navigator 12.67px', run: () => useStore.getState().updateSettings({ fontSize: 12.5, notesSize: 1, sidebarSize: 12.67 }) },
-    ]);
+    // Options stay open while you change them, so you can try several in a row.
     if (mode === 'behaviour') {
       const next = SCROLL_STEPS[(SCROLL_STEPS.indexOf(settings.scrollSpeed) + 1) % SCROLL_STEPS.length] ?? 2.5;
       return choose([
@@ -192,21 +204,15 @@ function PaletteBody({ initial }: { initial: PaletteMode }) {
       }));
     }
     if (mode === 'keys') {
-      // Every hotkey. A row that is a command runs it, when it can run where you are.
       return fuzzyFilter(query, hotkeys(), (k) => k.title, 200).map((h, i) => ({
         key: h.item.id ?? `key${i}:${h.item.title}`, label: h.item.title, positions: h.positions, hint: h.item.keys,
-        run: () => {
-          const c = h.item.id ? commands.find((x) => x.id === h.item.id) : undefined;
-          if (!c || (c.when && !c.when())) return;
-          close(false); c.run();
-          if (!useStore.getState().palette) { const id = focusedId(); if (id && c.id !== 'sidebar.search') focusPane(id); }
-        },
+        run: () => { if (h.item.id) { setBindingError(''); setEditing(h.item.id); } },
       }));
     }
     if (mode === 'commands') {
       const usable = commands.filter((c) => !/^tab\.\d$/.test(c.id) && (!c.when || c.when()));
       return fuzzyFilter(query, usable, (c) => c.title, 60).map((h) => ({
-        key: h.item.id, label: h.item.title, positions: h.positions, hint: h.item.keys?.[0] ? formatKeys(h.item.keys[0]) : undefined,
+        key: h.item.id, label: h.item.title, positions: h.positions, hint: commandKeys(h.item).slice(0, 1).map(formatKeys)[0],
         run: () => { close(false); h.item.run(); if (!useStore.getState().palette) { const id = focusedId(); if (id && !['sidebar.search'].includes(h.item.id)) focusPane(id); } },
       }));
     }
@@ -254,17 +260,14 @@ function PaletteBody({ initial }: { initial: PaletteMode }) {
         run: () => { const pane = activeTermPane(); close(); if (pane) bus.emit('input.set', { pane: pane.id, text: h.item }); },
       }));
     }
-    return fuzzyFilter(query, THEMES, (t) => t.name).map((h) => ({
-      key: h.item.id, label: h.item.name, detail: h.item.dark ? 'Dark' : 'Light', positions: h.positions,
-      preview: () => { applyTheme(h.item); setMonacoTheme(h.item); bus.emit('theme.preview', h.item.id); },
-      run: () => { committed.current = true; useStore.getState().updateSettings({ theme: h.item.id }); setMonacoTheme(h.item); close(); },
-    }));
+    return [];
   }, [mode, query, files, fonts, root, settings]);
 
   useEffect(() => { setIndex(0); }, [query, mode]);
   // Keyed on the highlighted row, not the row list: a preview changes settings, which rebuilds the list.
   const activeKey = rows[index]?.key;
   useEffect(() => {
+    if (mode === 'appearance' || mode === 'themes') revertPreview();
     rows[index]?.preview?.();
     listRef.current?.querySelector('.is-selected')?.scrollIntoView({ block: 'nearest' });
   }, [index, activeKey, mode]);
@@ -284,11 +287,58 @@ function PaletteBody({ initial }: { initial: PaletteMode }) {
   }, [rows]);
 
   const onKey = (e: React.KeyboardEvent) => {
+    if (binding && recording !== undefined) {
+      e.preventDefault(); e.stopPropagation();
+      if (e.key === 'Escape') { setRecording(undefined); setBindingError(''); return; }
+      if (e.repeat || e.nativeEvent.isComposing) return;
+      const key = keyOf(e.nativeEvent);
+      if (!key) return;
+      if (!(/[+]/.test(key) || /^f(?:[1-9]|1[0-9]|2[0-4])$/.test(key))) {
+        setBindingError('Use a modifier or a function key.'); return;
+      }
+      const other = key === shortcuts[recording] ? undefined : bindingConflict(binding.id, key);
+      if (other || shortcuts.some((k, i) => k === key && i !== recording)) {
+        setBindingError(other ? `Already assigned to ${other.title}` : 'Already assigned to this action'); return;
+      }
+      const next = [...shortcuts]; next[recording] = key;
+      setCommandKeys(binding.id, next);
+      setRecording(undefined); setBindingError('');
+      return;
+    }
+    if (binding) {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setEditing(undefined); inputRef.current?.focus(); }
+      return;
+    }
+    if (handleShortcut(e.nativeEvent, 'view.light')) {
+      setIndex(mode === 'themes' || rows[0]?.theme ? -1 : 0);
+      return;
+    }
     if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); back(); }
     else if (e.key === 'ArrowDown' || (e.ctrlKey && e.key === 'n')) { e.preventDefault(); setIndex((i) => Math.min(rows.length - 1, i + 1)); }
     else if (e.key === 'ArrowUp' || (e.ctrlKey && e.key === 'p')) { e.preventDefault(); setIndex((i) => Math.max(0, i - 1)); }
     else if (e.key === 'Enter') { e.preventDefault(); rows[index]?.run(e.metaKey); }
   };
+  const capture = (i: number) => { setRecording(i); setBindingError(''); inputRef.current?.focus(); };
+  const renderRow = (r: Row, i: number) => {
+    const t = r.theme;
+    const inUse = t?.id === settings.theme;
+    return (
+      <div key={r.key} data-font={r.load} className={`palette-row${i === index ? ' is-selected' : ''}${mode === 'history' ? ' is-mono' : ''}${t ? ' is-theme-row' : ''}${inUse ? ' is-in-use' : ''}`}
+        style={t ? { background: t.bg, color: t.text, '--tile-line': t.line } as React.CSSProperties : undefined}
+        aria-label={inUse ? `${r.label}, in use` : undefined}
+        onMouseMove={() => i !== index && setIndex(i)} onClick={(e) => r.run(e.metaKey)}>
+        {t && <ThemePreview theme={t} />}
+        <span className={t ? 'theme-name' : 'palette-label'} title={t ? r.label : undefined}
+          style={r.face ? { fontFamily: r.face } : undefined}>
+          <Highlight text={r.label} positions={r.positions} />
+        </span>
+        {r.detail && <span className="palette-detail">{r.detail}</span>}
+        {r.hint && <kbd>{r.hint}</kbd>}
+        {r.size && <FontSizeControl field={r.size} label={r.label} value={sizeInPx(settings, r.size)} returnFocus={() => inputRef.current?.focus()} />}
+      </div>
+    );
+  };
+  const firstTheme = rows.findIndex((r) => r.theme);
   const onChange = (v: string) => {
     if (mode === 'files' && v.startsWith('>')) { setMode('commands'); setQuery(v.slice(1).trimStart()); return; }
     setQuery(v);
@@ -303,20 +353,102 @@ function PaletteBody({ initial }: { initial: PaletteMode }) {
   return (
     <div className="palette-scrim" onMouseDown={(e) => { if (e.target === e.currentTarget) close(); }}>
       <div className="palette" role="dialog" aria-label="Palette">
-        <input ref={inputRef} value={query} placeholder={PLACEHOLDER[mode]} spellCheck={false} onChange={(e) => onChange(e.target.value)} onKeyDown={onKey} />
-        {/* Clicking a row keeps the keyboard in the search box, so Escape still steps back. */}
-        <div className="palette-list" ref={listRef} onMouseDown={(e) => e.preventDefault()}>
+        <input ref={inputRef} aria-label={binding ? 'Record a shortcut' : 'Search palette'} readOnly={!!binding} value={binding ? recording === undefined ? binding.title : 'Press a new shortcut • Esc to cancel' : query}
+          placeholder={PLACEHOLDER[mode]} spellCheck={false} onChange={(e) => onChange(e.target.value)} onKeyDown={onKey} />
+        {binding ? <div className="palette-list shortcut-editor" onKeyDown={(e) => { if (e.key === 'Escape') onKey(e); }}>
+          {shortcuts.map((key, i) => <div className="shortcut-slot" key={i}>
+            <kbd>{formatKeys(key)}</kbd>
+            <button onClick={() => capture(i)}>Change</button>
+            <button onClick={() => { setCommandKeys(binding.id, shortcuts.filter((_, j) => j !== i)); setRecording(undefined); setBindingError(''); }}>Remove</button>
+          </div>)}
+          <div className="shortcut-slot">
+            <button onClick={() => capture(shortcuts.length)}>Add shortcut</button>
+            <button onClick={() => {
+              const conflict = defaultBindingConflict(binding);
+              setRecording(undefined);
+              if (conflict) setBindingError(`A default shortcut is assigned to ${conflict.title}`);
+              else { setCommandKeys(binding.id); setBindingError(''); }
+            }}>Restore defaults</button>
+            <button onClick={() => { setRecording(undefined); setEditing(undefined); inputRef.current?.focus(); }}>Done</button>
+          </div>
+          {bindingError && <div className="shortcut-error" role="alert">{bindingError}</div>}
+        </div> : <div className={`palette-list${mode === 'settings' ? ' is-settings' : ''}${mode === 'appearance' ? ' is-appearance' : ''}`} ref={listRef} onMouseDown={(e) => {
+          if ((e.target as Element).closest('.font-size-control')) return;
+          e.preventDefault();
+          if (document.activeElement?.closest('.font-size-control')) inputRef.current?.focus();
+        }}>
           {rows.length === 0 && <div className="palette-empty">{empty}</div>}
-          {rows.map((r, i) => (
-            <div key={r.key} data-font={r.load} className={`palette-row${i === index ? ' is-selected' : ''}${mode === 'history' ? ' is-mono' : ''}`} onMouseMove={() => i !== index && setIndex(i)} onClick={(e) => r.run(e.metaKey)}>
-              <span className="palette-label" style={r.face ? { fontFamily: r.face } : undefined}><Highlight text={r.label} positions={r.positions} /></span>
-              {r.detail && <span className="palette-detail">{r.detail}</span>}
-              {r.hint && <kbd>{r.hint}</kbd>}
+          {(firstTheme < 0 ? rows : rows.slice(0, firstTheme)).map(renderRow)}
+          {firstTheme >= 0 && <section className={`palette-themes${firstTheme > 0 ? ' has-divider' : ''}`}>
+            <div className="palette-theme-header">
+              <h2>Theme</h2>
+              {lightKeys.length > 0 && <kbd title="Toggle light or dark mode">{formatKeys(lightKeys[0])}</kbd>}
             </div>
-          ))}
-        </div>
+            <div className="palette-theme-grid">{rows.slice(firstTheme).map((r, i) => renderRow(r, firstTheme + i))}</div>
+          </section>}
+        </div>}
       </div>
     </div>
+  );
+}
+
+function FontSizeControl({ field, label, value, returnFocus }: { field: FontSizeKey; label: string; value: number; returnFocus: () => void }) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const cancel = useRef(false);
+  const min = field === 'headingSize' ? 12 : 8;
+  const max = field === 'headingSize' ? 120 : 64;
+  const write = (value: number) => {
+    if (!Number.isFinite(value)) return;
+    const size = px(Math.max(min, Math.min(max, value)));
+    const store = useStore.getState();
+    if (size === sizeInPx(store.settings, field)) return;
+    store.updateSettings({ [field]: field === 'notesSize' ? size / 14 : size });
+  };
+  const adjust = (direction: number) => write(sizeInPx(useStore.getState().settings, field) + direction * 0.5);
+  return (
+    <span className="font-size-control" data-size={field} onClick={(e) => e.stopPropagation()} onKeyDown={(e) => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); returnFocus(); }
+    }}>
+      <button type="button" aria-label={`Decrease ${label} size`} disabled={value <= min} onClick={() => adjust(-1)}><Icon name="chevron" size={12} /></button>
+      <input type="number" inputMode="decimal" min={min} max={max} step="any" aria-label={`${label} size in pixels`}
+        value={draft ?? value} onChange={(e) => setDraft(e.currentTarget.value)}
+        onBlur={() => {
+          if (!cancel.current && draft?.trim()) write(Number(draft));
+          cancel.current = false;
+          setDraft(null);
+        }}
+        onKeyDown={(e) => {
+          if (e.key !== 'Enter' && e.key !== 'Escape') return;
+          e.preventDefault(); e.stopPropagation();
+          cancel.current = e.key === 'Escape';
+          returnFocus();
+        }} />
+      <button type="button" aria-label={`Increase ${label} size`} disabled={value >= max} onClick={() => adjust(1)}><Icon name="chevron" size={12} /></button>
+    </span>
+  );
+}
+
+function ThemePreview({ theme: t }: { theme: Theme }) {
+  const colors = {
+    '--preview-shell': t.bgDeep,
+    '--preview-line': t.line,
+    '--preview-tab': t.surfaceHi,
+    '--preview-text': t.text,
+    '--preview-dim': t.dim,
+    '--preview-accent': t.accent,
+    '--preview-bold': t.emphasis?.bold ?? t.text,
+    '--preview-italic': t.emphasis?.italic ?? t.text,
+    '--preview-link': t.emphasis?.link ?? t.text,
+  } as React.CSSProperties;
+  return (
+    <span className="theme-preview" style={colors} aria-hidden="true">
+      <span className="theme-preview-top"><i /><i /></span>
+      <span className="theme-preview-sidebar"><i /><i /><i /></span>
+      <span className="theme-preview-terminal"><i /><i /></span>
+      <span className="theme-preview-editor">
+        <i /><i className="theme-preview-bold" /><i className="theme-preview-italic" /><i className="theme-preview-link" />
+      </span>
+    </span>
   );
 }
 

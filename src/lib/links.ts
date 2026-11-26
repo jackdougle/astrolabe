@@ -1,5 +1,25 @@
 import { api, joinPath } from './api';
 import { useStore } from './store';
+// Snapshot of https://data.iana.org/TLD/tlds-alpha-by-domain.txt, bundled so this works offline.
+import rootZone from '../assets/iana-tlds.txt?raw';
+
+const tlds = new Set(rootZone.split(/\r?\n/).slice(1).map((s) => s.trim().toLowerCase()).filter(Boolean));
+
+/** Recognize web targets without mistaking local paths or invalid suffixes for domains. */
+export function webAddress(text: string) {
+  const explicit = /^https?:\/\//i.test(text);
+  if (!explicit && (text.startsWith('.') || text.startsWith('/') || text.includes('\\'))) return null;
+  const href = explicit ? text : `https://${text}`;
+  try {
+    const { hostname, username, password } = new URL(href);
+    if (!hostname || username || password) return null;
+    if (explicit) return href;
+    const parts = hostname.replace(/\.$/, '').toLowerCase().split('.');
+    return parts.length > 1 && parts.every((p) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(p))
+      && tlds.has(parts.at(-1)!) ? href : null;
+  } catch { return null; }
+}
+
 
 export interface FileTarget { path: string; line?: number; col?: number }
 
@@ -38,7 +58,11 @@ export async function openLink(href: string, baseDir: string) {
   const t = fileTarget(href, baseDir);
   if (!t) return;
   const st = await api.fs.stat(t.path);
-  if (!st.exists) { store.showToast(`No such file: ${t.path}`); return; }
+  if (!st.exists) {
+    const web = webAddress(href.trim());
+    if (web) { api.app.openExternal(web); return; }
+    store.showToast(`No such file: ${t.path}`); return;
+  }
   if (st.dir) { api.app.reveal(t.path); return; }
   store.openFile(t.path, t.line ? { line: t.line, col: t.col } : undefined);
 }

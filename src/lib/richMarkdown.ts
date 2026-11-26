@@ -173,20 +173,6 @@ const extras = $prose(() => keymap({
     return true;
   },
 }));
-// [words](address) typed out becomes the words, linked, as its closing bracket goes in (the raw view keeps the
-// notation, which is what the file holds). A picture's ![alt](address) is not a link, and neither is anything in code.
-const linkRule = $prose(() => inputRules({ rules: [
-  new InputRule(/(?<!!)\[([^[\]\n]+)\]\(([^()\s]+)\)$/, (state, match, start, end) => {
-    const link = state.schema.marks.link;
-    const code = state.schema.marks.inlineCode;
-    const $start = state.doc.resolve(start);
-    if (!link || $start.parent.type.spec.code || (code && state.doc.rangeHasMark(start, end, code))) return null;
-    const before = $start.parent.textBetween(0, $start.parentOffset, undefined, '\ufffc');
-    if ((before.split('`').length - 1) % 2) return null; // code still being typed
-    // The words keep whatever they already were (bold, say), and what is typed next is not part of the link.
-    return state.tr.replaceWith(start, end, state.schema.text(match[1], link.create({ href: match[2] }).addToSet($start.marks()))).removeStoredMark(link);
-  }),
-] }));
 const emojiRule = $prose(() => inputRules({ rules: [
   new InputRule(/(?:^|[\s(>"'])(:([a-z0-9_+-]+):)$/i, (state, match, _start, end) => {
     const emoji = emojiFor(match[2]);
@@ -438,7 +424,7 @@ export async function mountRich(root: HTMLElement, model: monacoNs.editor.ITextM
     })
     // > makes a toggle here, so the preset's own rule for it (a quote) is left out; so is its heading rule, for the one in richHashes.ts.
     .use(commonmark.filter((plugin) => plugin !== wrapInBlockquoteInputRule && plugin !== wrapInHeadingInputRule)).use(gfm.filter((plugin) => plugin !== strikethroughInputRule && plugin !== wrapInTaskListInputRule)).use(notion).use(underline).use(collapseLinks).use(hashMark).use(headingRule)
-    .use(history).use(linkPaste).use(clipboard).use(listener).use(extras).use(pairs).use(notionRules).use(emojiRule).use(symbolRules).use(linkRule).use(clicks).use(tickMotion).use(cutLine).use(joinNotes).use(hashes).use(imageView).use(imageDrops).use(motion).use(shift).use(drawnSelection).use(caret).use(reviewMarks).use(findMarks)
+    .use(history).use(linkPaste).use(clipboard).use(listener).use(extras).use(pairs).use(notionRules).use(emojiRule).use(symbolRules).use(clicks).use(tickMotion).use(cutLine).use(joinNotes).use(hashes).use(imageView).use(imageDrops).use(motion).use(shift).use(drawnSelection).use(caret).use(reviewMarks).use(findMarks)
     .create();
 
   // The file and the note are kept in step block by block. Each top-level block of the note is tied to the

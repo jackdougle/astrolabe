@@ -5,6 +5,7 @@ export interface Theme {
   text: string; dim: string; faint: string;
   accent: string; ok: string; err: string; info: string; violet: string; cyan: string;
   selection: string;
+  emphasis?: { bold: string; italic: string; link: string; underline: string };
   /** Terminal yellow, and numbers in code. Left out, it is the accent on a dark theme and a dark ochre on a light one. */
   yellow?: string;
   /** Colours in code where a theme's own differ from the slots above (GitHub's keywords are red, its strings blue). */
@@ -36,22 +37,12 @@ export const THEMES: Theme[] = [
     accent: '#2F4BB8', ok: '#3A7A36', err: '#C23B36', info: '#2F4BB8', violet: '#3E5FCB', cyan: '#1C7C77',
     selection: '#C9D3F5' },
 
-  // Tokyo Night: cool indigo nights with purple and blue in them. Three darks share one light twin, Day.
+  // Tokyo Night: cool indigo nights with purple and blue in them. Its light twin is Day.
   { id: 'tokyo-night', name: 'Tokyo Night', dark: true, twin: 'tokyo-day',
     bg: '#1A1B26', bgDeep: '#16161E', surface: '#1F2335', surfaceHi: '#292E42', line: '#292E42',
     text: '#C0CAF5', dim: '#9AA5CE', faint: '#565F89',
     accent: '#BB9AF7', ok: '#9ECE6A', err: '#F7768E', info: '#7AA2F7', violet: '#BB9AF7', cyan: '#7DCFFF',
     selection: '#33467C', yellow: '#E0AF68', code: { number: '#FF9E64', type: '#2AC3DE', variable: '#C0CAF5' } },
-  { id: 'tokyo-storm', name: 'Tokyo Night Storm', dark: true, twin: 'tokyo-day',
-    bg: '#24283B', bgDeep: '#1F2335', surface: '#292E42', surfaceHi: '#343A55', line: '#3B4261',
-    text: '#C0CAF5', dim: '#A9B1D6', faint: '#5F6A97',
-    accent: '#BB9AF7', ok: '#9ECE6A', err: '#F7768E', info: '#7AA2F7', violet: '#BB9AF7', cyan: '#7DCFFF',
-    selection: '#364A82', yellow: '#E0AF68', code: { number: '#FF9E64', type: '#2AC3DE', variable: '#C0CAF5' } },
-  { id: 'tokyo-moon', name: 'Tokyo Night Moon', dark: true, twin: 'tokyo-day',
-    bg: '#222436', bgDeep: '#1E2030', surface: '#2A2D45', surfaceHi: '#2F334D', line: '#3B4261',
-    text: '#C8D3F5', dim: '#A9B8E8', faint: '#636DA6',
-    accent: '#C099FF', ok: '#C3E88D', err: '#FF757F', info: '#82AAFF', violet: '#C099FF', cyan: '#86E1FC',
-    selection: '#2D3F76', yellow: '#FFC777', code: { number: '#FF966C', type: '#65BCFF', variable: '#C8D3F5' } },
   { id: 'tokyo-day', name: 'Tokyo Night Day', dark: false, twin: 'tokyo-night',
     bg: '#E1E2E7', bgDeep: '#D5D6DE', surface: '#ECEDF1', surfaceHi: '#C8CBD9', line: '#C4C8DA',
     text: '#343B58', dim: '#5A6390', faint: '#8990B3',
@@ -59,7 +50,7 @@ export const THEMES: Theme[] = [
     selection: '#B7C1E3', yellow: '#8F5E15', code: { number: '#965027', type: '#0F4B6E', variable: '#343B58' } },
 
   // Pure black and pure white: no tint at all, blue for emphasis.
-  { id: 'pure-black', name: 'Pure Black', dark: true, twin: 'pure-white',
+  { id: 'pure-black', name: 'Pure', dark: true, twin: 'pure-white',
     bg: '#000000', bgDeep: '#000000', surface: '#0E0E0E', surfaceHi: '#1A1A1A', line: '#202020',
     text: '#E8E8E8', dim: '#9B9B9B', faint: '#5C5C5C',
     accent: '#4DA6FF', ok: '#6FD08C', err: '#F25F66', info: '#6FB8FF', violet: '#9DB7FF', cyan: '#5AD3E8',
@@ -69,6 +60,20 @@ export const THEMES: Theme[] = [
     text: '#141414', dim: '#555555', faint: '#999999',
     accent: '#0A64D8', ok: '#1E7B34', err: '#C8252C', info: '#0A64D8', violet: '#3E5FCB', cyan: '#0F7A80',
     selection: '#CCE0FF' },
+
+  // Electric keeps the surfaces neutral and puts the color in the typography.
+  { id: 'electric-blue-dark', name: 'Electric', dark: true, twin: 'electric-blue-light',
+    bg: '#000000', bgDeep: '#000000', surface: '#101010', surfaceHi: '#202020', line: '#4A4A4A',
+    text: '#FAFAFA', dim: '#C6C6C6', faint: '#999999',
+    accent: '#64B8FF', ok: '#7ADF9F', err: '#FF8A9A', info: '#83C4FF', violet: '#C5A7F7', cyan: '#86DAE7',
+    selection: '#143555', yellow: '#F3D078',
+    emphasis: { bold: '#43EDFF', italic: '#C7FF58', link: '#FF81E5', underline: '#F4FF35' } },
+  { id: 'electric-blue-light', name: 'Electric', dark: false, twin: 'electric-blue-dark',
+    bg: '#FFFFFF', bgDeep: '#FFFFFF', surface: '#F7F7F7', surfaceHi: '#EAEAEA', line: '#929292',
+    text: '#101010', dim: '#363636', faint: '#585858',
+    accent: '#0059B7', ok: '#146637', err: '#AC1E36', info: '#0755A9', violet: '#6442A0', cyan: '#006773',
+    selection: '#C1DBFA', yellow: '#775000',
+    emphasis: { bold: '#004CCE', italic: '#365D00', link: '#A50084', underline: '#695500' } },
 
   // GitHub, after its Primer colours, with its own code colours (red keywords, blue strings).
   { id: 'github-dark', name: 'GitHub Dark', dark: true, twin: 'github-light',
@@ -111,12 +116,14 @@ export function mix(a: string, b: string, t: number) {
   return '#' + pa.map((v, i) => Math.round(v + (pb[i] - v) * t).toString(16).padStart(2, '0')).join('');
 }
 
-export function applyTheme(t: Theme) {
+export function applyTheme(t: Theme, accentColor?: string) {
   const r = document.documentElement.style;
   const vars: Record<string, string> = {
     bg: t.bg, 'bg-deep': t.bgDeep, surface: t.surface, 'surface-hi': t.surfaceHi, line: t.line,
-    text: t.text, dim: t.dim, faint: t.faint, accent: t.accent, ok: t.ok, err: t.err, info: t.info,
+    text: t.text, dim: t.dim, faint: t.faint, accent: /^#[0-9a-f]{6}$/i.test(accentColor ?? '') ? accentColor! : t.accent, ok: t.ok, err: t.err, info: t.info,
     violet: t.violet, cyan: t.cyan, selection: t.selection,
+    'bold-color': t.emphasis?.bold ?? 'inherit', 'italic-color': t.emphasis?.italic ?? 'inherit',
+    'link-color': t.emphasis?.link ?? t.info, 'underline-color': t.emphasis?.underline ?? '',
   };
   for (const [k, v] of Object.entries(vars)) r.setProperty(`--${k}`, v);
   r.setProperty('--find', findColor(t));
@@ -163,8 +170,9 @@ export function monacoTheme(t: Theme) {
       { token: 'variable', foreground: s(c.variable) },
       { token: 'predefined', foreground: s(t.info) },
       { token: 'regexp', foreground: s(t.cyan) },
-      { token: 'emphasis', fontStyle: 'italic' },
-      { token: 'strong', fontStyle: 'bold' },
+      { token: 'emphasis', fontStyle: 'italic', ...(t.emphasis && { foreground: s(t.emphasis.italic) }) },
+      ...(t.emphasis ? [{ token: 'string.link.markdown', foreground: s(t.emphasis.link) }] : []),
+      { token: 'strong', fontStyle: 'bold', ...(t.emphasis && { foreground: s(t.emphasis.bold) }) },
     ],
     colors: {
       'editor.background': '#00000000', 'editor.foreground': t.text,
@@ -190,7 +198,7 @@ export function monacoTheme(t: Theme) {
       'list.hoverBackground': t.surfaceHi, 'list.activeSelectionBackground': t.surfaceHi, 'list.highlightForeground': t.accent,
       'editorStickyScroll.background': t.bg, 'editorGutter.background': '#00000000',
       'editorError.foreground': t.err, 'editorWarning.foreground': yellowOf(t), 'editorInfo.foreground': t.info,
-      'editorLink.activeForeground': t.info, 'minimap.background': t.bg,
+      'editorLink.activeForeground': t.emphasis?.link ?? t.info, 'minimap.background': t.bg,
     },
   };
 }

@@ -1,5 +1,5 @@
-// A link that runs over several rows is underlined along all of it while the pointer is on any piece: one the
-// terminal wrapped, and one a program marked itself (OSC 8) and broke over two rows with an indent.
+// A link the terminal wraps is underlined along all of it. Separate, indented labels with the same
+// address are only underlined on the row the pointer is on.
 export const settings = { zoom: 1 };
 export default async function ({ page, shot, run, work }) {
   const ok = (name, pass, detail = '') => console.log(`${pass ? 'ok  ' : 'FAIL'} ${name}${detail ? `: ${detail}` : ''}`);
@@ -42,18 +42,18 @@ export default async function ({ page, shot, run, work }) {
   await hover(t, last + 1, 40);
   ok('off the link, the lines go', (await lines()) === '');
 
-  // A link marked by a program, broken over two rows, the second indented.
+  // Two links marked by a program, the second indented.
   await run(String.raw`printf '\e]8;;https://example.com/doc\e\\see-the-first-part-\e]8;;\e\\\n    \e]8;;https://example.com/doc\e\\of-the-link\e]8;;\e\\ and more\n'`);
   t = await term();
   const a = t.rows.findIndex((r) => r.startsWith('see-the-first-part-'));
   ok('the marked link is on two rows', a >= 0 && t.rows[a + 1].startsWith('    of-the-link and more'), JSON.stringify(t.rows.slice(a, a + 2)));
   await hover(t, a, 5);
   got = await lines();
-  ok('pointer on the first piece: the second is underlined, without its indent or what follows', got === `${a + 1}:4+11`, got);
+  ok('pointer on the first label: no underline on the next row', got === '', got);
   await shot('linkline-2-marked');
   await hover(t, a + 1, 8);
   got = await lines();
-  ok('pointer on the second piece: the first is', got === `${a}:0+19`, got);
+  ok('pointer on the second label: no underline on the previous row', got === '', got);
   await hover(t, a + 1, 20);
   ok('past the link on that row, nothing', (await lines()) === '');
 }

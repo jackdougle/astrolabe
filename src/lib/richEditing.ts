@@ -317,6 +317,10 @@ const CLOSE_BEFORE = ';:.,=}])> \n\t';
 interface Pair { open: number; close: number; a: string; b: string }
 const pairKey = new PluginKey<Pair[]>('astrolabe-pairs');
 
+export function hasAutoCloser(state: EditorState, pos?: number, char?: string) {
+  return pairKey.getState(state)?.some((p) => (pos === undefined || p.close === pos) && (char === undefined || p.b === char)) ?? false;
+}
+
 function wrap(view: EditorView, text: string) {
   const { state } = view;
   const sel = state.selection;
@@ -369,9 +373,9 @@ export const pairs = $prose(() => new Plugin<Pair[]>({
       if (from !== to || !(sel instanceof TextSelection)) return false;
       const over = (pairKey.getState(state) ?? []).find((p) => p.close === sel.head && p.b === text);
       if (over) {
-        // Typing the closing half: the one put in for you makes way, and the key then goes in as usual.
-        view.dispatch(state.tr.delete(over.close, over.close + 1));
-        return false;
+        // Confirm the closer without deleting and reinserting it through separate input handlers.
+        view.dispatch(state.tr.setSelection(TextSelection.create(state.doc, over.close + 1)).scrollIntoView());
+        return true;
       }
       const closer = CLOSERS[text];
       if (!closer) return false;

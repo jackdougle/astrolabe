@@ -101,6 +101,8 @@ const api = {
     bootFailed: () => ipcRenderer.send('app:bootFailed'),
     openExternal: (url: string) => ipcRenderer.send('app:openExternal', url),
     reveal: (file: string) => ipcRenderer.send('app:reveal', file),
+    reloadWindow: () => ipcRenderer.send('app:reloadWindow'),
+    toggleDevTools: () => ipcRenderer.send('app:toggleDevTools'),
     newWindow: () => ipcRenderer.send('app:newWindow'),
     /** A tab is being dragged outside the window: shows the outline of the window it would become there (null: it came back). */
     tearOver: (spec: unknown) => ipcRenderer.send('tear:over', spec),

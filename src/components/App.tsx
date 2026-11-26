@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { flushSync } from 'react-dom';
 import { api, basename, tildify } from '../lib/api';
-import { attachPaths, closeFileTab, formatKeys, handleShortcut, newFileBeside, pathsOf, pickAndAttach, runCommand, updateApp } from '../lib/commands';
+import { attachPaths, closeFileTab, handleShortcut, newFileBeside, pathsOf, pickAndAttach, runCommand, shortcutLabel, updateApp } from '../lib/commands';
 import { areaRects, computeLayout, DividerRect, findSplit, keepLeaves, leafShares, LayoutNode, leaves } from '../lib/layout';
 import { carry, docking } from '../lib/dock';
 import { graphRoot, isGraph } from '../lib/graph';
@@ -89,8 +89,11 @@ export function App() {
   useEffect(() => { setMonacoTheme(getTheme(theme)); }, [theme]);
   useEffect(() => {
     document.documentElement.style.setProperty('--sidebar-size', `${settings.sidebarSize}px`);
-    document.documentElement.style.setProperty('--notes-size', String(settings.notesSize));
-  }, [settings.sidebarSize, settings.notesSize]);
+    const style = document.documentElement.style;
+    style.setProperty('--notes-size', String(settings.notesSize));
+    if (settings.headingSize != null) style.setProperty('--heading-base', `${settings.headingSize / 2.2}px`);
+    else style.removeProperty('--heading-base');
+  }, [settings.sidebarSize, settings.notesSize, settings.headingSize]);
   useEffect(() => { document.documentElement.style.setProperty('--zoom', String(zoom)); }, [zoom]);
   useEffect(() => {
     const r = document.documentElement.style;
@@ -520,6 +523,7 @@ function TermSeg(props: SegProps & { pane: TermPane; finished: 'ok' | 'failed' |
   const { pane: p, finished, active, weight } = props;
   const [entering, entered] = useEntering();
   const l = termLabel(p);
+  const tabLabel = p.running && p.command?.trim() ? l.app : '>_';
   const running = p.running && !p.waiting;
   const failed = !p.running && !!p.lastExit;
   const close = () => { useStore.getState().closePane(p.id); focusFront(); };
@@ -529,7 +533,7 @@ function TermSeg(props: SegProps & { pane: TermPane; finished: 'ok' | 'failed' |
       onAnimationEnd={entered}
       onAuxClick={(e) => { if (e.button === 1) close(); }}>
       <span className={`tab-mark${running ? ' is-running' : finished === 'ok' ? ' is-ok' : failed || finished === 'failed' ? ' is-failed' : ''}`} />
-      <span className="toptab-text is-path"><span className="top-dir">{l.dir ? `${l.dir} ` : ''}</span><span className="top-app">{l.app}</span></span>
+      <span className="toptab-text is-path"><span className="top-dir">{l.dir ? `${l.dir} ` : ''}</span><span className="top-app">{tabLabel}</span></span>
       <button className="toptab-close" {...tip('Close terminal', active ? 'pane.close' : undefined)} onMouseDown={(e) => e.stopPropagation()} onClick={close}><Icon name="x" size={11} /></button>
     </div>
   );
@@ -850,7 +854,9 @@ function PaneTree({ id: tree, root, activePane, maximized, active, focused }: { 
             again={placed === id} onAgain={() => setPlaced(null)}
             moving={carried === id} onGrab={split && !maximized && !gone ? grab(id) : undefined}
             style={{ left: `${r.x}%`, top: `${r.y}%`, width: `${r.w}%`, height: `${r.h}%`, visibility: hidden ? 'hidden' : undefined }}>
-            {pane.kind === 'terminal' ? <TerminalPane pane={pane} active={isActive || !split} /> : <EditorPane pane={pane} active={isActive || !split} />}
+            {pane.kind === 'terminal'
+              ? <TerminalPane pane={pane} active={isActive || !split} visible={active && !hidden && !gone} />
+              : <EditorPane pane={pane} active={isActive || !split} />}
           </PaneBox>
         );
       })}
@@ -919,7 +925,7 @@ function HiddenTerms({ right, bottom }: { right: number | null; /** How far the 
     <div className={`hidden-terms${right === null ? ' is-apart' : ''}${clear ? ' is-clear' : ''}`} ref={ref} style={{ ...(right === null ? { left: 12 } : { right: `calc(${right}% + 14px)` }), bottom: bottom > 0 ? `calc(${bottom}% + 7px)` : undefined }}>
       {open && (
         <div className="hidden-pop" role="menu" aria-label="Hidden terminals">
-          <div className="hidden-head"><span>Hidden terminals</span><kbd>{formatKeys('cmd+shift+u')}</kbd></div>
+          <div className="hidden-head"><span>Hidden terminals</span><kbd>{shortcutLabel('term.showAll')}</kbd></div>
           {list.map((p) => {
             const l = termLabel(p);
             return (

@@ -17,9 +17,11 @@ export default async function ({ page, shot, run, work }) {
     return { cell, box: { x: box.x, y: box.y }, rows, cols: t.cols };
   });
   const active = () => page.evaluate(() => { const s = window.__store.getState(); const e = Object.values(s.panes).find((p) => p.kind === 'editor'); return e?.active ? e.active.split('/work/')[1] : null; });
+  let cols;
   const shut = async () => {
     await page.evaluate(() => { const s = window.__store.getState(); for (const p of Object.values(s.panes)) if (p.kind === 'editor') for (const f of [...p.files]) s.closeFile(p.id, f.path); });
-    await at(400);
+    // Closing the editor animates the terminal area before the terminal refits to its full width.
+    await page.waitForFunction((width) => [...window.__sessions.values()][0].term.cols === width, cols);
     if (await page.evaluate(() => window.__store.getState().focus) !== 'terminal') { await page.keyboard.press('Control+`'); await at(400); }
   };
   // ⌘-click on the last place `word` shows in output.
@@ -37,7 +39,7 @@ export default async function ({ page, shot, run, work }) {
   fs.mkdirSync(path.join(work, 'reports'), { recursive: true });
   fs.writeFileSync(path.join(work, 'reports', 'pacing-frontier-brief-2026-11-21.md'), '# Brief\n');
   await run(`cd ${work}`);
-  const { cols } = await term();
+  ({ cols } = await term());
   const NAME = 'reports/pacing-frontier-brief-2026-11-21.md';
   /** Words that fill a row to `n` columns, ending in `tail`. */
   const fill = (n, tail) => { let s = ''; while (s.length < n - tail.length - 1) s += 'lorem '; return `${s.slice(0, n - tail.length - 1).replace(/ $/, 'x')} ${tail}`; };
@@ -60,5 +62,5 @@ export default async function ({ page, shot, run, work }) {
   await cmdClick(NAME.slice(8, 20));
   ok('and on its first', (await active()) === NAME, String(await active()));
   await shot('rowedge');
-  console.log(fails ? `${fails} FAILED` : 'all ok');
+  if (fails) throw new Error(`${fails} failed`);
 }

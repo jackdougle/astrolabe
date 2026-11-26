@@ -46,15 +46,19 @@ export const EDITORS = 'editors';
 /** The editor area: how its editors are arranged (null while no file is open), and the one that has, or last had, the keyboard. */
 export interface EditorArea { root: LayoutNode | null; active: string; maximized: boolean }
 export type SidebarView = 'files' | 'search';
-export type PaletteMode = 'commands' | 'files' | 'history' | 'themes' | 'fonts-notes' | 'fonts-headings' | 'fonts-code' | 'settings' | 'appearance' | 'fonts' | 'sizes' | 'behaviour' | 'keys';
+export type PaletteMode = 'commands' | 'files' | 'history' | 'themes' | 'fonts-notes' | 'fonts-headings' | 'fonts-code' | 'settings' | 'appearance' | 'fonts' | 'behaviour' | 'keys';
 
 export interface Settings {
   theme: string; zoom: number;
+  accentColor: string;
+  keybindings: Record<string, string[]>;
   /** The theme in use before light mode was last switched on or off (⌘0), to go back to. */
   themeBefore: string;
   fontSize: number;
   /** Text size of rendered notes, as a multiple of 14px. */
   notesSize: number;
+  /** Size of the first heading in px. Null keeps headings proportional to the note text. */
+  headingSize: number | null;
   /** Text size of the file navigator, in px. */
   sidebarSize: number;
   /** Weight of what you type in the terminal. Medium (500) is the floor; lighter values are raised to it.
@@ -108,7 +112,7 @@ export interface Settings {
   editorSide: Edge;
 }
 export const DEFAULT_SETTINGS: Settings = {
-  theme: 'meridian', themeBefore: '', zoom: 1, fontSize: 12.5, notesSize: 1, sidebarSize: 12.67, fontWeight: 600, outputWeight: 500, fontFamily: '', notesFont: '', headingFont: '',
+  theme: 'meridian', themeBefore: '', accentColor: '#7A8FA8', keybindings: {}, zoom: 1, fontSize: 12.5, notesSize: 1, headingSize: null, sidebarSize: 12.67, fontWeight: 600, outputWeight: 500, fontFamily: '', notesFont: '', headingFont: '',
   wordWrap: true, smoothCaret: true, restoreSession: true, previewTabs: true, reviewChanges: true, starfield: true, topBar: true, noteTitle: true, titleWires: true, startDirectory: '', imageUpload: '', noteTemplate: '', onFileClose: '',
   prompt: 'shell', opacityFocused: 0.95, opacityUnfocused: 0.89,
   chromeOpacityFocused: 1, chromeOpacityUnfocused: 0.94, scrollSpeed: 2.5, editorSide: 'right',
@@ -257,6 +261,8 @@ export const useStore = create<State>((set, get) => ({
   async init() {
     const [saved, state] = await Promise.all([api.settings.load(), api.state.load()]);
     const settings = { ...DEFAULT_SETTINGS, ...(saved as Partial<Settings>) };
+    if (settings.theme === 'tokyo-storm' || settings.theme === 'tokyo-moon') settings.theme = 'tokyo-night';
+    if (settings.themeBefore === 'tokyo-storm' || settings.themeBefore === 'tokyo-moon') settings.themeBefore = 'tokyo-night';
     // Opacity defaults have been retuned twice. A saved value that still equals an old default was never
     // a choice, so it moves to the current one; anything the user set by hand is left alone.
     const version = (saved as any)?.settingsVersion ?? 1;
@@ -272,7 +278,7 @@ export const useStore = create<State>((set, get) => ({
       if (was('chromeOpacityUnfocused', 0.8)) settings.chromeOpacityUnfocused = DEFAULT_SETTINGS.chromeOpacityUnfocused;
     }
     (settings as any).settingsVersion = 5;
-    applyTheme(getTheme(settings.theme));
+    applyTheme(getTheme(settings.theme), settings.accentColor);
     api.app.zoom(settings.zoom);
     // A window reloaded in place picks up exactly where the last page left off, shells and all.
     const left = carried<Carried>('layout');
@@ -802,7 +808,7 @@ export const useStore = create<State>((set, get) => ({
   updateSettings(patch) {
     const settings = { ...get().settings, ...patch };
     set({ settings });
-    if (patch.theme) applyTheme(getTheme(settings.theme));
+    if (patch.theme || patch.accentColor) applyTheme(getTheme(settings.theme), settings.accentColor);
     if (patch.zoom) api.app.zoom(settings.zoom);
     api.settings.save(settings);
   },

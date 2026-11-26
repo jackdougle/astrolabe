@@ -299,7 +299,7 @@ async function fileClosed(path: string) {
 }
 
 /** Switches between light and dark. A theme with a twin goes to it (Tokyo Night to Tokyo Night Day, GitHub Dark to
- *  GitHub Light), and back from the twin to the very theme you left (Storm comes back as Storm). Otherwise it goes to
+ *  GitHub Light), and back from the twin to the very theme you left. Otherwise it goes to
  *  the theme in use before the last switch when that is of the other kind, else to the first theme of the other kind. */
 function toggleLight() {
   const now = getTheme(S().settings.theme);
@@ -463,11 +463,14 @@ export const commands: Command[] = [
   { id: 'view.zoomReset', title: 'Reset zoom', keys: ['alt+cmd+0'], run: () => zoom(null) },
   { id: 'view.topBar', title: 'Show or hide the top bar', keys: ['cmd+shift+b'], run: () => S().updateSettings({ topBar: !S().settings.topBar }) },
   { id: 'view.light', title: 'Light mode on or off', keys: ['cmd+0'], run: () => toggleLight() },
+  { id: 'settings.menu', title: 'Open settings', keys: ['cmd+s'], when: () => !editor()?.active, run: () => S().openPalette('settings') },
   { id: 'settings.open', title: 'Open settings file', keys: ['cmd+,'], run: async () => {
     const st = await api.fs.stat(appInfo.settingsFile);
     if (!st.exists) await api.settings.save(S().settings);
     S().openFile(appInfo.settingsFile);
   } },
+  { id: 'window.reload', title: 'Reload the window where it stands', keys: ['alt+cmd+r'], run: () => api.app.reloadWindow() },
+  { id: 'window.devTools', title: 'Toggle Developer Tools', keys: ['alt+cmd+i'], run: () => api.app.toggleDevTools() },
   { id: 'window.new', title: 'New window', keys: ['cmd+shift+n'], run: () => api.app.newWindow() },
 ];
 
@@ -488,27 +491,54 @@ export function keyOf(e: KeyboardEvent) {
   return `${e.ctrlKey ? 'ctrl+' : ''}${e.altKey ? 'alt+' : ''}${e.shiftKey ? 'shift+' : ''}${e.metaKey ? 'cmd+' : ''}${key}`;
 }
 
-const byKey = new Map<string, Command[]>();
-for (const c of commands) for (const k of c.keys ?? []) {
-  const parts = k.split('+');
+const modifiers = ['ctrl', 'alt', 'shift', 'cmd'];
+function normalizeKey(binding: string) {
+  const parts = binding.split('+');
   const key = parts.pop()!;
-  const norm = `${parts.includes('ctrl') ? 'ctrl+' : ''}${parts.includes('alt') ? 'alt+' : ''}${parts.includes('shift') ? 'shift+' : ''}${parts.includes('cmd') ? 'cmd+' : ''}${key}`;
-  byKey.set(norm, [...(byKey.get(norm) ?? []), c]);
+  return [...modifiers.filter((m) => parts.includes(m)), key].join('+');
+}
+
+export function commandKeys(command: Command): string[] {
+  const custom = S().settings.keybindings?.[command.id];
+  return (Array.isArray(custom) && custom.every((key) => typeof key === 'string') ? custom : command.keys ?? []).map(normalizeKey);
+}
+
+export function bindingConflict(id: string, key: string) {
+  return commands.find((command) => command.id !== id && commandKeys(command).includes(key));
+}
+
+export function defaultBindingConflict(command: Command) {
+  const defaults = (command.keys ?? []).map(normalizeKey);
+  return commands.find((other) => other.id !== command.id && Array.isArray(S().settings.keybindings?.[other.id])
+    && commandKeys(other).some((key) => defaults.includes(key) && !other.keys?.map(normalizeKey).includes(key)));
+}
+
+export function shortcutLabel(id: string) {
+  const command = commands.find((c) => c.id === id);
+  return command ? commandKeys(command).slice(0, 1).map(formatKeys)[0] : undefined;
+}
+
+export function setCommandKeys(id: string, keys?: string[]) {
+  const keybindings = { ...S().settings.keybindings };
+  if (keys) keybindings[id] = keys;
+  else delete keybindings[id];
+  S().updateSettings({ keybindings });
 }
 
 /** Returns true when a shortcut was handled, so the key never reaches the terminal or editor. */
-export function handleShortcut(e: KeyboardEvent) {
+export function handleShortcut(e: KeyboardEvent, only?: string) {
   // Fn+F (Globe+F) is macOS's own full-screen key; here it does what ⌃⌘F does.
-  if (e.code === 'KeyF' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.getModifierState?.('Fn')) {
+  if (!only && !S().settings.keybindings?.['editor.expand'] && e.code === 'KeyF' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.getModifierState?.('Fn')) {
     e.preventDefault(); e.stopPropagation(); runCommand('editor.expand'); return true;
   }
   const k = keyOf(e);
   if (!k) return false;
-  for (const c of byKey.get(k) ?? []) {
+  for (const c of commands) {
+    if ((only && only !== c.id) || !commandKeys(c).includes(k)) continue;
     if ((c.when && !c.when()) || (c.keyWhen?.[k] && !c.keyWhen[k]())) continue;
     e.preventDefault();
     e.stopPropagation();
-    c.run();
+    if (!e.repeat || c.id !== 'view.light') c.run();
     return true;
   }
   return false;
@@ -543,17 +573,13 @@ const OTHER_KEYS: [title: string, keys: string][] = [
   ['Raw Markdown: outline of headings', '⇧⌘O'],
   ['Open a file path or a link', '⌘ click'],
   ['Navigator: open a file to the side', '⌥ click'],
-  ['Reload the window where it stands', '⌥⌘R'],
 ];
 /** Every hotkey, for the list the navigator's keyboard button opens. A row that is a command has its `id`. */
 export function hotkeys(): { id?: string; title: string; keys: string }[] {
   const rows: { id?: string; title: string; keys: string }[] = [];
   for (const c of commands) {
     if (!c.keys?.length) continue;
-    // The nine keys of a row of tabs are one line each.
-    const many = /^(tab|file)\.(\d)$/.exec(c.id);
-    if (many) { if (many[2] === '1') rows.push({ title: many[1] === 'tab' ? 'Go to terminal tab 1 to 9 (9 is the last)' : 'Go to open file 1 to 9 (9 is the last)', keys: `${formatKeys(c.keys[0])}–9` }); continue; }
-    rows.push({ id: c.id, title: c.title, keys: c.keys.map(formatKeys).join('  ') });
+    rows.push({ id: c.id, title: c.title, keys: commandKeys(c).map(formatKeys).join('  ') || 'Unbound' });
   }
   return [...rows, ...OTHER_KEYS.map(([title, keys]) => ({ title, keys }))];
 }

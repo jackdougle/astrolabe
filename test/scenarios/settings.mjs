@@ -11,9 +11,11 @@ export default async function ({ page, shot, run, work }) {
   await page.waitForTimeout(300);
   console.log('settings rows', await page.evaluate(() => [...document.querySelectorAll('.palette-row')].map((r) => r.textContent)));
   await shot('settings-menu');
-  await page.click('.palette-row:has-text("Font sizes")');
+  await page.click('.palette-row:has-text("Fonts")');
   await page.waitForTimeout(250);
-  await page.click('.palette-row:has-text("Navigator 14px")');
+  const navigatorSize = page.getByRole('spinbutton', { name: 'Navigator size in pixels' });
+  await navigatorSize.fill('14');
+  await navigatorSize.press('Enter');
   await page.waitForTimeout(250);
   console.log('navigator after 14px', await page.evaluate(() => getComputedStyle(document.querySelector('.sidebar')).fontSize));
   console.log('palette still open', await page.evaluate(() => !!document.querySelector('.palette')));
@@ -30,6 +32,6 @@ export default async function ({ page, shot, run, work }) {
   await page.waitForTimeout(250);
   await page.click('.palette-row:has-text("Starfield")');
   await page.waitForTimeout(200);
-  console.log('starfield row', await page.evaluate(() => [...document.querySelectorAll('.palette-row')].at(-1).textContent));
+  console.log('starfield row', await page.evaluate(() => [...document.querySelectorAll('.palette-row')].find((row) => row.textContent.includes('Starfield'))?.textContent));
   await shot('settings-appearance');
 }

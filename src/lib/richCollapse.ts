@@ -1,16 +1,13 @@
-// A link that was written out as notation around an address that is itself a link:
-//
-//     \[Charles Fracchia]\(<https://www.linkedin.com/in/charlesfracchia/>)
-//
-// This is what a note is left holding when "[name](address)" is pasted as formatted text whose address was already a
-// link (copied from a chat, a terminal or a web page): the brackets arrive as plain characters and are saved with
-// backslashes. In the rendered view it collapses into the name, linked. It is read that way when the note opens (the
-// file is not changed until that block is edited, and then it is written as an ordinary [name](address)), and a
-// paste that lands in that shape is put right as it goes in. A picture's ![alt](address) and anything in code are
-// left alone, and so is notation around an address that is not a link of its own.
-import { Plugin } from '@milkdown/kit/prose/state';
+// Link notation can become complete through any edit, including typing into the middle of it or pasting
+// rich text where the URL is already marked as a link. Collapse it after the edit, not on a particular key.
+import { isHistoryTransaction } from '@milkdown/kit/prose/history';
+import { Fragment } from '@milkdown/kit/prose/model';
 import type { Node as PMNode } from '@milkdown/kit/prose/model';
+import { Plugin } from '@milkdown/kit/prose/state';
+import type { EditorState } from '@milkdown/kit/prose/state';
 import { $prose, $remark } from '@milkdown/kit/utils';
+import { webAddress } from './links';
+import { hasAutoCloser } from './richEditing';
 
 /** Text that ends with the opening half: [name]( */
 const OPENING = /(?<!!)\[([^[\]\n]+)\]\($/;
@@ -40,45 +37,64 @@ function collapseMd(node: Md) {
 }
 const remarkCollapse = $remark('remarkCollapseLinks', () => () => (tree: unknown) => { collapseMd(tree as Md); });
 
-/** The places in a text block where notation wraps a link to its own address: what to replace, and with what. */
-function found(block: PMNode, start: number) {
-  const out: { from: number; to: number; node: PMNode }[] = [];
-  const link = block.type.schema.marks.link;
-  const code = block.type.schema.marks.inlineCode;
+/** ProseMirror offsets and string offsets agree even if the address has marks, or there are inline atoms. */
+function found(block: PMNode, start: number, state: EditorState) {
+  const out: { from: number; to: number; label: Fragment }[] = [];
+  const link = state.schema.marks.link;
   if (!link || block.type.spec.code) return out;
-  let pos = start;
-  for (let i = 0; i < block.childCount; i++) {
-    const kid = block.child(i);
-    const at = pos;
-    pos += kid.nodeSize;
-    if (i === 0 || i === block.childCount - 1 || !kid.isText) continue;
-    const mark = link.isInSet(kid.marks);
-    const before = block.child(i - 1);
-    const after = block.child(i + 1);
-    if (!mark || !before.isText || !after.isText || !after.text!.startsWith(')') || link.isInSet(before.marks) || (code && code.isInSet(before.marks))) continue;
-    const m = OPENING.exec(before.text!);
-    if (!m || !own(kid.text!, mark.attrs.href)) continue;
-    out.push({ from: at - (before.text!.length - m.index), to: at + kid.nodeSize + 1, node: block.type.schema.text(m[1], link.create({ href: mark.attrs.href }).addToSet(before.marks)) });
+  let text = '';
+  block.forEach((kid) => { text += kid.isText ? kid.text : '\0'.repeat(kid.nodeSize); });
+  for (const m of text.matchAll(/(?<![!\\])\[([^\[\]\n\x00]+)\]\(([^()\s<>\x00]+)\)/g)) {
+    const at = m.index!;
+    const labelEnd = at + 1 + m[1].length;
+    const end = at + m[0].length;
+    const href = webAddress(m[2]) ?? (/^(?:mailto:|file:\/\/|\.{1,2}\/|\/(?!\/)|#)/i.test(m[2]) ? m[2] : null);
+    if (!href || !m[1].trim()) continue;
+    // A generated closer is provisional while the caret is inside its pair. For instance, don't collapse
+    // google.co while the user is still typing google.com, or a label before they finish typing its words.
+    if (hasAutoCloser(state, start + labelEnd, ']') || hasAutoCloser(state, start + end - 1, ')')) continue;
+    if ((text.slice(0, at).split(/(?<!\\)`/).length - 1) % 2) continue;
+    let protectedText = false;
+    const destStart = labelEnd + 2;
+    block.nodesBetween(at, end, (node, off) => {
+      if (node.marks.some((mark) => mark.type.spec.code)) protectedText = true;
+      const anchor = link.isInSet(node.marks);
+      if (anchor && (off < destStart || off + node.nodeSize > end - 1 || !own(m[2], anchor.attrs.href))) protectedText = true;
+    });
+    if (protectedText) continue;
+    const label: PMNode[] = [];
+    const mark = link.create({ href });
+    block.content.cut(at + 1, labelEnd).forEach((node) => { label.push(node.mark(mark.addToSet(node.marks))); });
+    out.push({ from: start + at, to: start + end, label: Fragment.fromArray(label) });
   }
   return out;
 }
 
-const collapsePasted = $prose(() => new Plugin({
-  appendTransaction(trs, _old, state) {
-    // Typing goes in a character at a time and is the link rule's business; this looks only after something larger
-    // (a paste, a drop, text put in by a command) has landed.
-    if (!trs.some((tr) => tr.docChanged && tr.steps.some((step) => ((step as unknown as { slice?: { size: number } }).slice?.size ?? 0) > 2))) return null;
+const collapseEdited = $prose(() => new Plugin({
+  appendTransaction(trs, old, state) {
+    if (trs.some(isHistoryTransaction)) return null;
+    const { doc } = state;
     const hits: ReturnType<typeof found> = [];
-    state.doc.descendants((node, pos) => {
-      if (!node.isTextblock) return true;
-      if (node.childCount > 2) hits.push(...found(node, pos + 1));
-      return false;
-    });
+    const from = old.doc.content.findDiffStart(doc.content);
+    if (from !== null) {
+      const to = Math.max(from, old.doc.content.findDiffEnd(doc.content)?.b ?? from);
+      doc.nodesBetween(Math.max(0, from - 1), Math.min(to + 1, doc.content.size), (node, pos) => {
+        if (!node.isTextblock) return true;
+        hits.push(...found(node, pos + 1, state));
+        return false;
+      });
+    } else if (!state.selection.eq(old.selection) && (hasAutoCloser(old, undefined, ')') || hasAutoCloser(old, undefined, ']'))) {
+      // Stepping over an auto-closer, or moving out of its pair, only changes the selection.
+      const { $head } = old.selection;
+      if ($head.parent.isTextblock) hits.push(...found($head.parent, $head.start(), state));
+    }
     if (!hits.length) return null;
     const tr = state.tr;
-    for (const hit of hits.reverse()) tr.replaceWith(hit.from, hit.to, hit.node);
+    const head = state.selection.head;
+    for (const hit of hits.reverse()) tr.replaceWith(hit.from, hit.to, hit.label);
+    if (hits.some((hit) => head > hit.from && head <= hit.to)) tr.removeStoredMark(state.schema.marks.link);
     return tr;
   },
 }));
 
-export const collapseLinks = [remarkCollapse, collapsePasted].flat();
+export const collapseLinks = [remarkCollapse, collapseEdited].flat();
