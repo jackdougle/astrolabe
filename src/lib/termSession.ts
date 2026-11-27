@@ -933,21 +933,36 @@ export class TermSession {
     const mark = (row: number, col: number) => lines.get(row)?._extendedAttrs?.[col]?.urlId;
     const id = mark(y, x);
     if (!id) return out;
+    // The same link: a program may reopen one link on each row, which gives it a new id, so compare the destination.
+    const links = (this.term as any)._core._oscLinkService;
+    const same = (m: number | undefined) => m !== undefined && (m === id || (!!links?.getLinkData(m) && links.getLinkData(m)?.uri === links.getLinkData(id)?.uri && links.getLinkData(m)?.id === links.getLinkData(id)?.id));
     const piece = (row: number, col: number) => {
       let a = col; let b = col;
-      while (a > 0 && mark(row, a - 1) === id) a--;
-      while (b + 1 < cols && mark(row, b + 1) === id) b++;
+      while (a > 0 && same(mark(row, a - 1))) a--;
+      while (b + 1 < cols && same(mark(row, b + 1))) b++;
       return { row, x: a, w: b - a + 1 };
     };
     const start = piece(y, x);
-    for (let p = start; p.x === 0 && p.row > 0 && buf.getLine(p.row)?.isWrapped && y - p.row < 12;) {
-      if (mark(p.row - 1, cols - 1) !== id) break;
-      p = piece(p.row - 1, cols - 1);
+    // A cell with no character of its own (a space, or nothing).
+    const blank = (row: number, col: number) => !mark(row, col) && (buf.getLine(row)?.getCell(col)?.getChars() || ' ') === ' ';
+    // Only blank cells before `col` on its row: the link starts there, past an indent before a broken line.
+    const leads = (row: number, col: number) => { for (let c = 0; c < col; c++) if (!blank(row, c)) return false; return true; };
+    // Where the link picks up on a row: its first cell, past any indent. -1 if the row does not go on with it.
+    const entry = (row: number) => {
+      for (let c = 0; c < Math.min(cols, 24); c++) { if (same(mark(row, c))) return c; if (!blank(row, c)) return -1; }
+      return -1;
+    };
+    // The link runs on to the next row when it fills this one to the edge (a soft wrap, or a row a program broke
+    // itself) and that row goes on with it. Only the link's own cells are followed, so other text is not underlined.
+    for (let p = start; p.x + p.w === cols && p.row - y < 12 && buf.getLine(p.row + 1);) {
+      const c = entry(p.row + 1);
+      if (c < 0) break;
+      p = piece(p.row + 1, c);
       out.push(p);
     }
-    for (let p = start; p.x + p.w === cols && buf.getLine(p.row + 1)?.isWrapped && p.row - y < 12;) {
-      if (mark(p.row + 1, 0) !== id) break;
-      p = piece(p.row + 1, 0);
+    for (let p = start; leads(p.row, p.x) && p.row > 0 && y - p.row < 12;) {
+      if (!same(mark(p.row - 1, cols - 1))) break;
+      p = piece(p.row - 1, cols - 1);
       out.push(p);
     }
     return out;
