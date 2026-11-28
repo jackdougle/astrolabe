@@ -5,7 +5,7 @@ import { applyHeadingFont, applyNotesFont, BUNDLED, faceOf, FontInfo, googleFont
 import { fuzzyFilter } from '../lib/fuzzy';
 import { history, MONO, setMonacoTheme } from '../lib/monaco';
 import { bus, focusPane } from '../lib/panes';
-import { activeTermPane, DEFAULT_SETTINGS, focusedId, isMarkdown, outputWeight, PaletteMode, projectRoot, Settings, useStore } from '../lib/store';
+import { activeTermPane, chosenOutputWeight, DEFAULT_SETTINGS, focusedId, isMarkdown, PaletteMode, projectRoot, Settings, useStore } from '../lib/store';
 import { Icon } from './Icons';
 import { applyTheme, getTheme, THEMES, type Theme } from '../lib/themes';
 
@@ -88,7 +88,7 @@ function PaletteBody({ initial }: { initial: PaletteMode }) {
   };
   const go = (next: PaletteMode) => { revertPreview(); setMode(next); setQuery(''); };
   const back = () => { const parent = PARENT[mode]; if (parent) go(parent); else close(); };
-  const flip = (key: 'wordWrap' | 'smoothCaret' | 'restoreSession' | 'previewTabs' | 'reviewChanges' | 'starfield' | 'noteTitle' | 'titleWires') => {
+  const flip = (key: 'wordWrap' | 'smoothCaret' | 'spellcheck' | 'restoreSession' | 'previewTabs' | 'reviewChanges' | 'starfield' | 'noteTitle' | 'titleWires') => {
     const patch: Partial<Settings> = { [key]: !useStore.getState().settings[key] };
     useStore.getState().updateSettings(patch);
   };
@@ -111,7 +111,7 @@ function PaletteBody({ initial }: { initial: PaletteMode }) {
 
   const rows: Row[] = useMemo(() => {
     const on = (b: boolean) => (b ? 'On' : 'Off');
-    const weightNow = Number(outputWeight(settings));
+    const weightNow = chosenOutputWeight(settings);
     const weightNext = weightNow >= 600 ? 400 : weightNow + 100;
     if (mode === 'settings') return choose([
       { key: 'appearance', label: 'Appearance and themes', run: () => go('appearance') },
@@ -152,6 +152,7 @@ function PaletteBody({ initial }: { initial: PaletteMode }) {
       const next = SCROLL_STEPS[(SCROLL_STEPS.indexOf(settings.scrollSpeed) + 1) % SCROLL_STEPS.length] ?? 2.5;
       return choose([
         { key: 'caret', label: 'Smooth caret', detail: on(settings.smoothCaret), run: () => flip('smoothCaret') },
+        { key: 'spell', label: 'Spellcheck in notes and files', detail: on(settings.spellcheck), run: () => flip('spellcheck') },
         { key: 'preview', label: 'Temporary tabs for opened files', detail: on(settings.previewTabs), run: () => flip('previewTabs') },
         { key: 'review', label: 'Mark changes made from outside, to keep or undo', detail: on(settings.reviewChanges), run: () => flip('reviewChanges') },
         { key: 'restore', label: 'Reopen last session on launch', detail: on(settings.restoreSession), run: () => flip('restoreSession') },

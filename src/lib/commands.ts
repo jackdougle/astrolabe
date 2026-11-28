@@ -471,6 +471,7 @@ export const commands: Command[] = [
   { id: 'view.zoomOut', title: 'Zoom out', keys: ['cmd+-'], run: () => zoom(-0.1) },
   { id: 'view.zoomReset', title: 'Reset zoom', keys: ['alt+cmd+0'], run: () => zoom(null) },
   { id: 'view.topBar', title: 'Show or hide the top bar', keys: ['cmd+shift+b'], run: () => S().updateSettings({ topBar: !S().settings.topBar }) },
+  { id: 'editor.toggleSpellcheck', title: 'Spellcheck in notes and files on or off', run: () => { S().updateSettings({ spellcheck: !S().settings.spellcheck }); S().showToast(S().settings.spellcheck ? 'Spellcheck on' : 'Spellcheck off'); } },
   { id: 'view.light', title: 'Light mode on or off', keys: ['cmd+0'], run: () => toggleLight() },
   { id: 'settings.menu', title: 'Open settings', keys: ['cmd+s'], when: () => !editor()?.active, run: () => S().openPalette('settings') },
   { id: 'settings.open', title: 'Open settings file', keys: ['cmd+,'], run: async () => {

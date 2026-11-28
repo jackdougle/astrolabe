@@ -138,14 +138,15 @@ export class Sim {
   alpha = 1;
   alphaTarget = 0;
   /** How hard each note pushes the others. */ private mass: Float32Array;
-  /** `stretch` is the pane's width over its height: the notes settle into an oval of that shape, so they fill the pane. */
+  /** `stretch` would be the pane's width over its height, but the notes always settle into a circle, whatever the pane's shape. */
   constructor(public g: Graph, public stretch = 1) {
     this.mass = Float32Array.from(g.nodes, (n) => (n.deg ? 1 + PHYS.hub * Math.sqrt(n.deg) : PHYS.lone));
     this.stretch = Sim.shape(stretch);
     // With more notes the lean is gentler, so a large project is not pressed tighter than a small one.
     this.lean = PHYS.gravity / Math.sqrt(Math.max(1, this.mass.reduce((a, b) => a + b, 0) / 200));
   }
-  private static shape = (stretch: number) => Math.min(2.2, Math.max(0.6, stretch || 1));
+  // Always a circle: the pane's shape does not stretch the notes, the view simply fits them to the pane.
+  private static shape = (_stretch: number) => 1;
   /** The pane has a new shape: the notes move to fill it. Says whether that was enough of a change to move for. */
   reshape(stretch: number) {
     const to = Sim.shape(stretch);

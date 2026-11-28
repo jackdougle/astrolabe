@@ -327,6 +327,14 @@ export function EditorPane({ pane, active }: { pane: EditorPaneState; active: bo
     editor.focus();
   }, [pane.reveal?.n, loaded]);
 
+  // Spellcheck follows the setting in both views of a note and in the raw editor. The rendered view is made anew
+  // for each file, so this runs again when one is shown (richUp).
+  useEffect(() => {
+    const on = settings.spellcheck;
+    hostRef.current?.querySelectorAll<HTMLElement>('textarea, [contenteditable]').forEach((el) => { el.spellcheck = on; });
+    richRef.current?.querySelectorAll<HTMLElement>('.rich').forEach((el) => { el.spellcheck = on; });
+  }, [settings.spellcheck, loaded, richUp, rendered]);
+
   useEffect(() => {
     editorRef.current?.updateOptions({
       cursorSmoothCaretAnimation: settings.smoothCaret ? 'on' : 'off',

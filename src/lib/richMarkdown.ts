@@ -21,6 +21,7 @@ import { $prose, getMarkdown, insert } from '@milkdown/kit/utils';
 import '@milkdown/kit/prose/view/style/prosemirror.css';
 import type * as monacoNs from 'monaco-editor';
 import { api, appInfo, dirname } from './api';
+import { useStore } from './store';
 import { openLink } from './links';
 import { collapseLinks } from './richCollapse';
 import { closeLinkBox, promptLink, setLink, showLinkBox } from './richLink';
@@ -415,7 +416,7 @@ export async function mountRich(root: HTMLElement, model: monacoNs.editor.ITextM
       ctx.set(headingIdGenerator.key, headingId);
       // In a file, only ~~two tildes~~ strike words through; a single ~ is itself.
       ctx.set(remarkGFMPlugin.options.key, { singleTilde: false });
-      ctx.update(editorViewOptionsCtx, (prev) => ({ ...prev, editable: () => !readOnly, attributes: { class: 'rich', spellcheck: 'false' } }));
+      ctx.update(editorViewOptionsCtx, (prev) => ({ ...prev, editable: () => !readOnly, attributes: { class: 'rich', spellcheck: String(useStore.getState().settings.spellcheck) } }));
       ctx.get(listenerCtx).markdownUpdated((_ctx, markdown) => {
         if (applying || readOnly || destroyed) return;
         // A report that is already out of date (the file was reloaded from disk since) must not undo the reload.

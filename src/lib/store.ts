@@ -77,6 +77,8 @@ export interface Settings {
   /** No longer read: lines always wrap, since nothing scrolls sideways. Kept so that old settings files still load. */
   wordWrap: boolean;
   smoothCaret: boolean;
+  /** Red underlines for misspelled words in notes and files (not the terminal). */
+  spellcheck: boolean;
   /** Where new terminal tabs start, e.g. "~/projects". Empty means your home folder. Splits stay in the folder you split from. */
   startDirectory: string;
   /** Faint constellation lines behind everything. */
@@ -115,7 +117,7 @@ export interface Settings {
 }
 export const DEFAULT_SETTINGS: Settings = {
   theme: 'meridian', themeBefore: '', accentColor: '#7A8FA8', keybindings: {}, zoom: 1, fontSize: 12.5, notesSize: 1, headingSize: null, sidebarSize: 12.67, fontWeight: 600, outputWeight: 500, fontFamily: '', notesFont: '', headingFont: '',
-  wordWrap: true, smoothCaret: true, restoreSession: true, previewTabs: true, reviewChanges: true, starfield: true, topBar: true, noteTitle: true, titleWires: true, startDirectory: '', imageUpload: '', noteTemplate: '', onFileClose: '',
+  wordWrap: true, smoothCaret: true, spellcheck: true, restoreSession: true, previewTabs: true, reviewChanges: true, starfield: true, topBar: true, noteTitle: true, titleWires: true, startDirectory: '', imageUpload: '', noteTemplate: '', onFileClose: '',
   prompt: 'shell', opacityFocused: 0.95, opacityUnfocused: 0.89,
   chromeOpacityFocused: 1, chromeOpacityUnfocused: 0.94, scrollSpeed: 2.5, editorSide: 'right',
 };
@@ -242,10 +244,17 @@ function makeTerm(cwd: string): TermPane {
 }
 
 /** What you type is never lighter than medium. */
-export const termWeight = (s: Settings) => String(Math.min(700, Math.max(500, Math.round((Number(s.fontWeight) || 600) / 100) * 100)));
+/** Light themes are set 300 heavier than dark ones, so the text reads at the same weight on a pale ground. */
+const lightBoost = (s: Settings) => (getTheme(s.theme).dark ? 0 : 300);
+
+const baseTermWeight = (s: Settings) => Math.min(700, Math.max(500, Math.round((Number(s.fontWeight) || 600) / 100) * 100));
+export const termWeight = (s: Settings) => String(baseTermWeight(s) + lightBoost(s));
 
 /** What programs print: regular to semibold, medium unless chosen otherwise. Bold text stays bold (700). */
-export const outputWeight = (s: Settings) => String(Math.min(600, Math.max(400, Math.round((Number(s.outputWeight) || 500) / 100) * 100)));
+const baseOutputWeight = (s: Settings) => Math.min(600, Math.max(400, Math.round((Number(s.outputWeight) || 500) / 100) * 100));
+export const outputWeight = (s: Settings) => String(baseOutputWeight(s) + lightBoost(s));
+/** The weight chosen in the settings, without the light-theme boost (what the palette shows). */
+export const chosenOutputWeight = (s: Settings) => baseOutputWeight(s);
 
 /** The folder new terminal tabs open in. */
 export function startDir(s: Settings = useStore.getState().settings) {
