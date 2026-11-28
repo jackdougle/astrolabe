@@ -693,7 +693,7 @@ html[data-theme="light"] .rich-title { color: color-mix(in srgb, color-mix(in sr
 /* The box under a clicked link in a rendered note: its address (click to go there), a pencil to change it and a bin to take the link off. */
 .link-box { position: fixed; z-index: 55; display: flex; align-items: center; gap: 2px; max-width: min(460px, calc(100vw - 16px)); padding: 3px; border-radius: 7px; background: var(--surface); border: 1px solid var(--line); box-shadow: 0 6px 20px rgb(0 0 0 / 0.28); font: 12px/1.4 var(--mono); animation: link-box-in 0.12s var(--ease-out); }
 .link-box button { flex: none; height: 22px; display: flex; align-items: center; gap: 6px; border-radius: 4px; color: var(--dim); }
-.link-box button:hover { background: var(--surface-hi); color: var(--text); }
+.link-box button:hover { color: var(--text); }
 .link-box .link-go { flex: 0 1 auto; min-width: 0; padding: 0 7px; color: var(--info); }
 .link-box .link-go:hover { color: var(--info); }
 .link-box .link-go span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; }

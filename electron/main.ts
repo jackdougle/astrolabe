@@ -249,6 +249,8 @@ async function runUserCommand(command: string, arg: string, timeout: number) {
   });
 }
 
+const contextFile = (id: number) => path.join(CONFIG_DIR, `editor-${process.pid}-${id}.json`);
+
 function spawnSession(wc: WebContents, id: string, opts: { cwd?: string; cols: number; rows: number; prompt?: 'own' | 'native' }) {
   let cwd = opts.cwd ? expandHome(opts.cwd) : os.homedir();
   try { if (!fs.statSync(cwd).isDirectory()) cwd = os.homedir(); } catch { cwd = os.homedir(); }
@@ -257,12 +259,19 @@ function spawnSession(wc: WebContents, id: string, opts: { cwd?: string; cols: n
   const old = sessions.get(id);
   if (old) { sessions.delete(id); try { old.proc.kill(); } catch {} }
   const nonce = newNonce();
+  const env = shellEnv(USER_SHELL, isZsh ? integrationDir : null, opts.prompt ?? 'native', nonce);
+  env.ASTROLABE_CONTEXT_PATH = contextFile(wc.id);
+  env.ASTROLABE_CONTEXT_HOOK = path.join(__dirname, 'editorContext.cjs');
+  const command = 'node "$ASTROLABE_CONTEXT_HOOK"';
+  const hook = { type: 'command', command };
+  env.ASTROLABE_CLAUDE_CONTEXT = JSON.stringify({ hooks: { UserPromptSubmit: [{ hooks: [hook] }] } });
+  env.ASTROLABE_CODEX_CONTEXT = `hooks.UserPromptSubmit=[{hooks=[{type="command",command=${JSON.stringify(command)}}]}]`;
   const proc = pty.spawn(USER_SHELL, ['-l'], {
     name: 'xterm-256color',
     cols: Math.max(2, opts.cols),
     rows: Math.max(2, opts.rows),
     cwd,
-    env: shellEnv(USER_SHELL, isZsh ? integrationDir : null, opts.prompt ?? 'native', nonce) as { [k: string]: string },
+    env: env as { [k: string]: string },
   });
   const s: Session = { proc, wc, buf: '', timer: null, held: false, since: null, cut: 0, exit: null };
   sessions.set(id, s);
@@ -759,6 +768,8 @@ function createWindow(from?: { bounds: Electron.Rectangle; handoff: Record<strin
     },
   });
   const wc = win.webContents;
+  const snapshot = contextFile(wc.id);
+  wc.once('destroyed', () => fs.rmSync(snapshot, { force: true }));
   if (from) handoffs.set(wc.id, from.handoff);
   // Only the first window reopens the last session. A second one that did would start its shells under the
   // first one's names, which ends the first one's.
@@ -1017,6 +1028,14 @@ function linkPreview(address: string) {
 
 function registerIpc() {
   const ipcMain = guarded; // every handler below goes through the check above
+  ipcMain.on('editor:activeFile', (event, file: unknown) => {
+    if (file !== null && (typeof file !== 'string' || !path.isAbsolute(file))) return;
+    const target = contextFile(event.sender.id);
+    try {
+      fs.writeFileSync(target + '.tmp', JSON.stringify({ activeFile: file }), { mode: 0o600 });
+      fs.renameSync(target + '.tmp', target);
+    } catch (error) { console.warn('Could not update editor context', error); }
+  });
   ipcMain.handle('pty:spawn', (e, id: string, opts) => spawnSession(e.sender, id, opts));
   // A shell answers only to the page it belongs to: one whose tab has gone to another window has no more say in it.
   const own = (e: Electron.IpcMainEvent, id: string) => { const s = sessions.get(id); return s && s.wc === e.sender ? s : null; };

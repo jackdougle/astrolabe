@@ -40,6 +40,17 @@ async function boot() {
     document.fonts.load('400 13px "Symbols Nerd Font Mono"', '\ue0b0'),
   ]).catch(() => {});
   await useStore.getState().init();
+  let previousFile: string | null | undefined;
+  const publishFile = (state: ReturnType<typeof useStore.getState>) => {
+    const editor = state.panes[state.editors.active];
+    const file = editor?.kind === 'editor' ? editor.active : null;
+    if (file !== previousFile) {
+      api.setActiveFile(file);
+      previousFile = file;
+    }
+  };
+  publishFile(useStore.getState());
+  useStore.subscribe(publishFile);
   // Saved Google Fonts: wait briefly so the first paint uses them, but never hold the app up offline.
   const { fontFamily, notesFont, headingFont } = useStore.getState().settings;
   const wanted = [fontFamily, notesFont, headingFont].filter(Boolean).map((f) => loadGoogleFont(f));

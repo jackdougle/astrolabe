@@ -35,6 +35,7 @@ function uncover() {
 }
 
 const api = {
+  setActiveFile: (file: string | null) => ipcRenderer.send('editor:activeFile', file),
   pty: {
     spawn: (id: string, opts: { cwd?: string; cols: number; rows: number; prompt?: 'own' | 'native' }) => ipcRenderer.invoke('pty:spawn', id, opts),
     write: (id: string, data: string) => ipcRenderer.send('pty:write', id, data),

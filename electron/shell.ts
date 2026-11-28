@@ -40,6 +40,10 @@ if [[ -f "$ASTROLABE_USER_ZDOTDIR/.zshrc" ]]; then
   ZDOTDIR="$ASTROLABE_ZDOTDIR"
 fi
 
+# Preserve user-defined launchers while adding the editor hook in this shell only.
+aliases[codex]="\${aliases[codex]:-codex}"' -c "$ASTROLABE_CODEX_CONTEXT"'
+aliases[claude]="\${aliases[claude]:-claude}"' --settings "$ASTROLABE_CLAUDE_CONTEXT"'
+
 __astrolabe_b64() { builtin print -rn -- "$1" | command base64 | command tr -d '\\n' }
 
 # Runs first among precmd hooks so $? is still the command's exit status.
