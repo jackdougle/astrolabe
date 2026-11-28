@@ -109,12 +109,13 @@ function atHashes(state: EditorState) {
   const n = lead($head.parent, hashOf(state));
   return $head.parentOffset <= n ? { n, pos: $head.before(), node: $head.parent, offset: $head.parentOffset } : null;
 }
-/** Backspace where a heading's words begin takes one # away, so the heading goes up a level; the last # leaves an ordinary line. (Among the #s it deletes the one before the caret, which comes to the same.) */
+/** Backspace where a heading's words begin, its #s on show, deletes the space after them, as in the file: the #s all
+ *  stay, and without the space the line is an ordinary one (`edited`, below) until it is typed again. */
 export const hashBackspace: Cmd = (state, dispatch) => {
   const here = atHashes(state);
-  if (!here || !here.n || here.offset !== here.n) return false; // (with no #s on show, Backspace does what it does anywhere)
-  const level = here.node.attrs.level - 1;
-  if (dispatch) dispatch(level ? state.tr.setNodeMarkup(here.pos, undefined, { ...here.node.attrs, level }) : unhead(state.tr, here.pos, here.node));
+  if (!here || !here.n || here.offset !== here.n) return false; // (among the #s, or with none on show, Backspace does what it does anywhere)
+  const at = state.selection.head;
+  if (dispatch) dispatch(state.tr.delete(at - 1, at).scrollIntoView());
   return true;
 };
 /** Enter before a heading's words opens an empty line above it and leaves the heading whole. */

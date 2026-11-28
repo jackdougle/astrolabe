@@ -208,7 +208,7 @@ body.is-resizing .area { transition: none !important; }
 /* A pane is picked up by the bar at the middle of its top edge. It shows only while the pointer is over the pane,
    and sits in the strip above the first line of text, just under the divider's line (the divider keeps the
    line itself and everything above it, and its whole length on either side). */
-.pane-grip { position: absolute; top: 2px; left: 50%; z-index: 7; width: 72px; height: 7px; margin-left: -36px; display: flex; justify-content: center; cursor: grab; opacity: 0; transition: opacity 0.12s; }
+.pane-grip { position: absolute; top: 2px; left: 50%; z-index: 7; width: 72px; height: 7px; margin-left: -36px; display: flex; justify-content: center; cursor: grab; opacity: 0; transition: opacity 0.2s; }
 .pane-grip::after { content: ""; width: 44px; height: 3px; margin-top: 1px; border-radius: 2px; background: var(--dim); transition: width 0.12s var(--ease-out), background 0.12s; }
 .pane:hover > .pane-grip { opacity: 0.55; }
 .pane > .pane-grip:hover { opacity: 1; }
@@ -364,7 +364,7 @@ body.is-dragging-files, body.is-dragging-files * { cursor: grabbing !important; 
 .blk.is-native::before { display: none; }
 .blk.is-native .blk-head { pointer-events: none; }
 .blk.is-native .blk-cwd, .blk.is-native .blk-branch, .blk.is-native .blk-meta { display: none; }
-.blk.is-native .blk-actions { display: flex; margin-left: auto; padding: 1px 3px; border-radius: 5px; background: var(--surface); border: 1px solid var(--line); opacity: 0; pointer-events: auto; transition: opacity 0.12s; }
+.blk.is-native .blk-actions { display: flex; margin-left: auto; padding: 1px 3px; border-radius: 5px; background: var(--surface); border: 1px solid var(--line); opacity: 0; pointer-events: auto; transition: opacity 0.2s; }
 .blk.is-native .blk-head:hover .blk-actions, .blk.is-native.is-selected .blk-actions, .blk.is-native .blk-actions:hover { opacity: 1; }
 .blk.is-native.is-pinned .blk-head { pointer-events: auto; }
 .blk.is-native.is-pinned .blk-meta { display: inline; margin-left: 0; }
@@ -428,7 +428,7 @@ body.is-dragging-files, body.is-dragging-files * { cursor: grabbing !important; 
 .counts > * { pointer-events: auto; }
 .counts-chip { padding: 2px 7px; border-radius: 5px; color: var(--faint); background: color-mix(in srgb, var(--bg-deep) 82%, transparent); white-space: nowrap; }
 .counts-chip:hover, .counts-chip[aria-expanded="true"] { color: var(--text); background: var(--surface); }
-.counts-pop { display: grid; grid-template-columns: auto auto; gap: 4px 9px; padding: 9px 13px 10px 11px; border-radius: 8px; background: var(--surface); border: 1px solid var(--line); box-shadow: 0 6px 20px rgb(0 0 0 / 0.28); color: var(--dim); white-space: nowrap; transform-origin: 100% 100%; animation: counts-in 0.12s var(--ease-out); }
+.counts-pop { display: grid; grid-template-columns: auto auto; gap: 4px 9px; padding: 9px 13px 10px 11px; border-radius: 8px; background: var(--surface); border: 1px solid var(--line); box-shadow: 0 6px 20px rgb(0 0 0 / 0.28); color: var(--dim); white-space: nowrap; transform-origin: 100% 100%; animation: counts-in 0.2s var(--ease-out); }
 .counts-pop b { text-align: right; font-weight: 600; color: var(--text); }
 .counts-head { grid-column: 1 / -1; color: var(--faint); font-size: 10.5px; letter-spacing: 0.04em; }
 .counts-head:not(:first-child) { margin-top: 5px; }
@@ -441,14 +441,14 @@ body.is-dragging-files, body.is-dragging-files * { cursor: grabbing !important; 
 .hidden-terms .hidden-chip, .counts-chip { transition: color 0.3s var(--ease-out), background-color 0.3s var(--ease-out), opacity 0.3s var(--ease-out); }
 .hidden-terms.is-clear .hidden-chip, .counts.is-clear .counts-chip { pointer-events: none; opacity: 0.06; }
 .hidden-terms > * { pointer-events: auto; }
-.hidden-chip { display: flex; align-items: center; gap: 6px; padding: 2px 8px 2px 7px; border-radius: 5px; color: var(--dim); background: color-mix(in srgb, var(--bg-deep) 88%, transparent); box-shadow: inset 0 0 0 1px var(--line); white-space: nowrap; font-variant-numeric: tabular-nums; animation: counts-in 0.14s var(--ease-out); }
+.hidden-chip { display: flex; align-items: center; gap: 6px; padding: 2px 8px 2px 7px; border-radius: 5px; color: var(--dim); background: color-mix(in srgb, var(--bg-deep) 88%, transparent); box-shadow: inset 0 0 0 1px var(--line); white-space: nowrap; font-variant-numeric: tabular-nums; animation: counts-in 0.2s var(--ease-out); }
 .hidden-chip:hover, .hidden-chip[aria-expanded="true"] { color: var(--text); background: var(--surface); }
 .hidden-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .hidden-head kbd { font: inherit; color: var(--faint); }
 /* The terminal mark is still, and glows and pulses only while a command is at work in a hidden terminal. */
 .hidden-mark { flex: none; display: grid; place-items: center; }
 .hidden-mark.is-working { color: var(--neon); filter: drop-shadow(0 0 3px var(--neon)) drop-shadow(0 0 6px color-mix(in srgb, var(--neon) 60%, transparent)); animation: pulse 1.6s ease-in-out infinite; }
-.hidden-pop { display: flex; flex-direction: column; min-width: 200px; max-width: min(360px, 60vw); max-height: 50vh; overflow-y: auto; padding: 4px; border-radius: 8px; background: var(--surface); border: 1px solid var(--line); box-shadow: 0 6px 20px rgb(0 0 0 / 0.28); transform-origin: 100% 100%; animation: counts-in 0.12s var(--ease-out); }
+.hidden-pop { display: flex; flex-direction: column; min-width: 200px; max-width: min(360px, 60vw); max-height: 50vh; overflow-y: auto; padding: 4px; border-radius: 8px; background: var(--surface); border: 1px solid var(--line); box-shadow: 0 6px 20px rgb(0 0 0 / 0.28); transform-origin: 100% 100%; animation: counts-in 0.2s var(--ease-out); }
 .hidden-head { padding: 4px 8px 5px; color: var(--faint); font-size: 10.5px; letter-spacing: 0.04em; white-space: nowrap; }
 .hidden-row { flex: none; display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 5px; text-align: left; font: 11.5px var(--mono); color: var(--dim); white-space: nowrap; }
 .hidden-row:hover { background: var(--surface-hi); color: var(--text); }
@@ -618,7 +618,7 @@ html[data-theme="light"] .rich-title { color: color-mix(in srgb, color-mix(in sr
 .rich .selectedCell ::selection, .rich .selectedCell::selection { background: transparent; }
 .rich .column-resize-handle { display: none; }
 /* The grips beside a hovered table's row and above its column. */
-.table-grip { position: fixed; z-index: 40; border-radius: 3px; background: color-mix(in srgb, var(--faint) 45%, transparent); opacity: 0; pointer-events: none; cursor: pointer; transition: opacity 0.12s, background-color 0.12s; }
+.table-grip { position: fixed; z-index: 40; border-radius: 3px; background: color-mix(in srgb, var(--faint) 45%, transparent); opacity: 0; pointer-events: none; cursor: pointer; transition: opacity 0.2s, background-color 0.12s; }
 .table-grip.is-row { width: 5px; }
 .table-grip.is-col { height: 5px; }
 .table-grip.is-on { opacity: 1; pointer-events: auto; }
@@ -691,7 +691,7 @@ html[data-theme="light"] .rich-title { color: color-mix(in srgb, color-mix(in sr
 .palette-row kbd { flex: none; margin-left: auto; }
 .palette-empty { padding: 14px 10px; color: var(--faint); }
 /* The box under a clicked link in a rendered note: its address (click to go there), a pencil to change it and a bin to take the link off. */
-.link-box { position: fixed; z-index: 55; display: flex; align-items: center; gap: 2px; max-width: min(460px, calc(100vw - 16px)); padding: 3px; border-radius: 7px; background: var(--surface); border: 1px solid var(--line); box-shadow: 0 6px 20px rgb(0 0 0 / 0.28); font: 12px/1.4 var(--mono); animation: link-box-in 0.12s var(--ease-out); }
+.link-box { position: fixed; z-index: 55; display: flex; align-items: center; gap: 2px; max-width: min(460px, calc(100vw - 16px)); padding: 3px; border-radius: 7px; background: var(--surface); border: 1px solid var(--line); box-shadow: 0 6px 20px rgb(0 0 0 / 0.28); font: 12px/1.4 var(--mono); animation: link-box-in 0.2s var(--ease-out); }
 .link-box button { flex: none; height: 22px; display: flex; align-items: center; gap: 6px; border-radius: 4px; color: var(--dim); }
 .link-box button:hover { color: var(--text); }
 .link-box :is(.link-head, .link-go) { cursor: pointer; }
@@ -711,11 +711,11 @@ html[data-theme="light"] .rich-title { color: color-mix(in srgb, color-mix(in sr
 .link-box.is-editing { border-color: color-mix(in srgb, var(--accent) 60%, var(--line)); }
 @keyframes link-box-in { from { opacity: 0; transform: translateY(-3px); } }
 @media (prefers-reduced-motion: reduce) { .link-box { animation: none; } }
-.toast { position: fixed; z-index: 60; left: 50%; bottom: 26px; transform: translateX(-50%); padding: 6px 13px; border-radius: 7px; background: var(--surface-hi); border: 1px solid var(--line); box-shadow: 0 8px 26px rgb(0 0 0 / 0.35); font-size: 12px; animation: toast-in 0.14s ease-out; }
+.toast { position: fixed; z-index: 60; left: 50%; bottom: 26px; transform: translateX(-50%); padding: 6px 13px; border-radius: 7px; background: var(--surface-hi); border: 1px solid var(--line); box-shadow: 0 8px 26px rgb(0 0 0 / 0.35); font-size: 12px; animation: toast-in 0.2s ease-out; }
 .tooltip { position: fixed; z-index: 70; display: flex; align-items: center; gap: 9px; padding: 4px 8px; border-radius: 6px; background: var(--surface-hi); border: 1px solid var(--line); box-shadow: 0 6px 20px rgb(0 0 0 / 0.35); font-size: 11.5px; color: var(--text); white-space: nowrap; pointer-events: none; }
 .tooltip kbd { color: var(--dim); }
 /* The update notice (UpdateNotice in App.tsx): top middle of the window, just under the tab row. */
-.update-notice { position: fixed; z-index: 60; left: 50%; top: calc(var(--bar) + 8px); transform: translateX(-50%); display: flex; align-items: center; gap: 9px; padding: 5px 6px 5px 11px; border-radius: 8px; background: var(--surface-hi); border: 1px solid var(--line); box-shadow: 0 8px 26px rgb(0 0 0 / 0.35); font-size: 12px; color: var(--text); white-space: nowrap; animation: update-in 0.18s ease-out; }
+.update-notice { position: fixed; z-index: 60; left: 50%; top: calc(var(--bar) + 8px); transform: translateX(-50%); display: flex; align-items: center; gap: 9px; padding: 5px 6px 5px 11px; border-radius: 8px; background: var(--surface-hi); border: 1px solid var(--line); box-shadow: 0 8px 26px rgb(0 0 0 / 0.35); font-size: 12px; color: var(--text); white-space: nowrap; animation: update-in 0.2s ease-out; }
 .update-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--neon); box-shadow: 0 0 6px color-mix(in srgb, var(--neon) 70%, transparent); }
 .update-go { padding: 3px 10px; border-radius: 5px; background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--text); font-weight: 600; }
 .update-go:hover { background: color-mix(in srgb, var(--accent) 38%, transparent); }
@@ -766,12 +766,22 @@ html[data-theme="light"] .rich-title { color: color-mix(in srgb, color-mix(in sr
 .rich .rv-old { background: color-mix(in srgb, var(--rv-old) 13%, transparent); box-shadow: -7px 0 0 color-mix(in srgb, var(--rv-old) 13%, transparent), -10px 0 0 var(--rv-old); color: color-mix(in srgb, var(--text) 60%, var(--rv-old)); }
 .rich .rv-new { background: color-mix(in srgb, var(--rv-add) 13%, transparent); box-shadow: -7px 0 0 color-mix(in srgb, var(--rv-add) 13%, transparent), -10px 0 0 var(--rv-add); }
 /* At the foot of the file: how many are waiting, and all of them at once. */
-.changes-bar { position: absolute; left: 50%; bottom: 8px; z-index: 7; transform: translateX(-50%); display: flex; align-items: center; gap: 1px; font: 500 11px var(--mono); white-space: nowrap; border-radius: 6px; overflow: hidden; background: var(--surface); box-shadow: 0 0 0 1px var(--line), 0 6px 18px rgb(0 0 0 / 0.3); animation: counts-in 0.14s var(--ease-out); }
+.changes-bar { position: absolute; left: 50%; bottom: 8px; z-index: 7; transform: translateX(-50%); display: flex; align-items: center; gap: 1px; font: 500 11px var(--mono); white-space: nowrap; border-radius: 6px; overflow: hidden; background: var(--surface); box-shadow: 0 0 0 1px var(--line), 0 6px 18px rgb(0 0 0 / 0.3); animation: counts-in 0.2s var(--ease-out); }
 .changes-n { padding: 3px 10px 3px 11px; color: var(--text); box-shadow: inset 3px 0 0 var(--rv-add); }
 .changes-bar button { padding: 3px 9px; }
 .changes-bar .changes-step { display: grid; place-items: center; padding: 3px 6px; }
 /* Its tab's mark turns green until the changes have been looked at. */
 .tab-file.has-changes:not(.is-dirty) { color: var(--rv-add); }
+
+/* ---------- pop-ups ---------- */
+/* All of them fade in and out over 200 ms (those with an entrance of their own above fade as part of it). popfade.ts
+   puts a copy back for the way out. */
+.findbar, .palette-scrim, .tooltip { animation: pop-in 0.2s ease; }
+@keyframes pop-in { from { opacity: 0; } }
+@keyframes pop-out { from { opacity: 1; } to { opacity: 0; } }
+.is-ghost.is-ghost { pointer-events: none; animation: pop-out 0.2s ease forwards; }
+.is-ghost.is-ghost * { pointer-events: none; animation: none; transition: none; }
+@media (prefers-reduced-motion: reduce) { .findbar, .palette-scrim, .tooltip, .changes-bar { animation: none; } }
 
 /* ---------- opening and closing ---------- */
 /* Entrances only fade and slide, never scale: a new terminal measures its character size while it appears. */

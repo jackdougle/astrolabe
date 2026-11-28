@@ -53,7 +53,11 @@ export default async function ({ page, shot, run, type, work }) {
   await key('Backspace', 2);
   ok('2 Backspace among them: up again', (await last()) === 'H2 [## ]Made', await last());
   await key('ArrowRight', 2); await key('Backspace');
-  ok('2 Backspace where the words begin: a # at a time', (await last()) === 'H1 [# ]Made' && (await caret()) === '# ', `${await last()} ${JSON.stringify(await caret())}`);
+  ok('2 Backspace where the words begin takes the space, not a #', (await last()) === 'P []##Made' && (await caret()) === '##', `${await last()} ${JSON.stringify(await caret())}`);
+  await type(' '); await page.waitForTimeout(300);
+  ok('2 and the space typed again makes the same heading', (await last()) === 'H2 [## ]Made' && (await caret()) === '## ', `${await last()} ${JSON.stringify(await caret())}`);
+  await key('Backspace'); await key('Backspace'); await type(' '); await page.waitForTimeout(300);
+  ok('2 a second Backspace takes a #', (await last()) === 'H1 [# ]Made', await last());
   await key('Meta+ArrowLeft'); await type('##'); await page.waitForTimeout(300);
   ok('2 #s typed in front', (await last()) === 'H3 [### ]Made', await last());
   await key('ArrowRight'); await key('Delete'); await page.waitForTimeout(200);
@@ -84,6 +88,12 @@ export default async function ({ page, shot, run, type, work }) {
   await key('Meta+z');
   await key('Backspace');
   ok('3 Backspace there takes a level away', (await last()) === 'H4 []Made', await last());
+
+  // 3b. The #s alone, then their space: Backspace takes the space back and leaves every #.
+  await into('.rich h2', 40); await key('Meta+ArrowDown'); await key('Enter'); await type('### '); await page.waitForTimeout(300);
+  await key('Backspace');
+  ok('3b "### " then Backspace leaves "###"', (await last()) === 'P []###' && (await caret()) === '###', `${await last()} ${JSON.stringify(await caret())}`);
+  await key('Backspace', 3);
 
   // 4. Out of the note, and the file.
   await into('.rich h2', 40);

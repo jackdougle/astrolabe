@@ -10,7 +10,7 @@ export default async function ({ page, shot, work }) {
   await page.evaluate((f) => window.__store.getState().openFile(f), note);
   await page.waitForSelector('.ProseMirror a[href="../main.py"]');
   await page.waitForTimeout(400);
-  const box = () => page.evaluate(() => { const b = document.querySelector('.link-box'); if (!b) return null; const r = b.getBoundingClientRect(); return { text: b.querySelector('.link-go span')?.textContent ?? null, top: Math.round(r.top), left: Math.round(r.left), editing: b.classList.contains('is-editing') }; });
+  const box = () => page.evaluate(() => { const b = document.querySelector('.link-box:not(.is-ghost)'); if (!b) return null; const r = b.getBoundingClientRect(); return { text: b.querySelector('.link-go span')?.textContent ?? null, top: Math.round(r.top), left: Math.round(r.left), editing: b.classList.contains('is-editing') }; });
   const text = () => page.evaluate(() => window.__monaco.editor.getModels().find((m) => m.uri.path.endsWith('links.md'))?.getValue());
   const files = () => page.evaluate(() => [...document.querySelectorAll('.filetab-name')].map((e) => e.textContent));
 

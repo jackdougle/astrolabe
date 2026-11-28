@@ -19,6 +19,7 @@ import { api, loadAppInfo } from './lib/api';
 import { carried, loadHandoff, markLive, resumed } from './lib/handoff';
 import { applyHeadingFont, applyNotesFont, loadGoogleFont } from './lib/fonts';
 import { useStore } from './lib/store';
+import { watchPops } from './lib/popfade';
 import './lib/untitled'; // empty untitled notes are cleared away once you are off them
 
 // xterm's GPU renderer builds its font string with a leading space, which this
@@ -61,6 +62,7 @@ async function boot() {
   if (fontFamily) loadGoogleFont(fontFamily).then(() => import('./lib/termSession').then((m) => m.allSessions().forEach((s) => s.applyAppearance())));
   const { App } = await import('./components/App');
   createRoot(document.getElementById('root')!).render(<App />);
+  watchPops();
   // Tell the main process once the first screen is really there. After a reload in place it has been showing
   // a picture of the old page, which goes now; the wait is capped so a slow file never leaves the picture up.
   const frame = () => new Promise((r) => requestAnimationFrame(r));
