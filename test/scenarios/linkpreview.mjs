@@ -30,6 +30,11 @@ export default async function ({ page, shot, work }) {
   ok('the title shows', got?.shown && got.title === 'The Sky & Its Instruments', JSON.stringify(got));
   ok('the icon shows, left of the title', got?.icon && got.iconLeft, JSON.stringify(got));
   ok('the title sits above the address', got?.above && got.address === url, JSON.stringify(got));
+  for (const selector of ['.link-head span', '.link-go span']) {
+    const link = page.locator(`.link-box ${selector}`);
+    await link.hover();
+    ok(`hand cursor over ${selector}`, await link.evaluate((el) => getComputedStyle(el).cursor === 'pointer'));
+  }
   await shot('linkpreview-1');
 
   await page.click('.ProseMirror h1');
